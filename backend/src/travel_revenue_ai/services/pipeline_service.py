@@ -2,17 +2,26 @@
 
 Координирует последовательный запуск существующих сервисов:
 Signal -> SignalEnrichmentService -> RevenueScoringService -> FilteringService ->
-DecisionCardService -> MorningBriefService
+DecisionCardService -> MorningBriefService.
+
+При явном внедрении RevenueIntelligenceEngine дополнительно выполняет
+изолированный анализ. Его результат не влияет на существующий Morning Brief.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from time import perf_counter
 
 from travel_revenue_ai.intelligence.signal_enrichment_service import SignalEnrichmentService
 from travel_revenue_ai.models.signal import Signal
 from travel_revenue_ai.observability.metrics import MetricsService
+from travel_revenue_ai.revenue_intelligence.contracts import (
+    RevenueIntelligenceInput,
+    RevenueIntelligenceResult,
+)
+from travel_revenue_ai.revenue_intelligence.engine import RevenueIntelligenceEngine
 from travel_revenue_ai.services.decision_card_service import (
     DecisionCard,
     DecisionCardService,
@@ -34,6 +43,14 @@ from travel_revenue_ai.services.revenue_scoring_service import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class PipelineResult:
+    """Результат запуска Pipeline с необязательным Intelligence-расширением."""
+
+    morning_brief: MorningBriefResult
+    revenue_intelligence_results: list[RevenueIntelligenceResult] | None = None
+
+
 class PipelineService:
     """Сервис полного конвейера генерации Morning Brief."""
 
@@ -45,6 +62,7 @@ class PipelineService:
         decision_card_service: DecisionCardService | None = None,
         morning_brief_service: MorningBriefService | None = None,
         metrics_service: MetricsService | None = None,
+        revenue_intelligence_engine: RevenueIntelligenceEngine | None = None,
     ) -> None:
         """Инициализирует конвейер с зависимостями по умолчанию или внедрёнными извне."""
         self.metrics_service = metrics_service or MetricsService()
@@ -55,9 +73,14 @@ class PipelineService:
         self.filtering_service = filtering_service or FilteringService()
         self.decision_card_service = decision_card_service or DecisionCardService()
         self.morning_brief_service = morning_brief_service or MorningBriefService()
+        self.revenue_intelligence_engine = revenue_intelligence_engine
 
     def generate_morning_brief(self, signals: list[Signal]) -> MorningBriefResult:
-        """Запускает полный конвейер и возвращает готовый MorningBriefResult."""
+        """Запускает совместимый Pipeline и возвращает прежний MorningBriefResult."""
+        return self.run(signals).morning_brief
+
+    def run(self, signals: list[Signal]) -> PipelineResult:
+        """Запускает Pipeline и возвращает необязательный результат Revenue Intelligence."""
         if signals is None:
             raise ValueError("signals не может быть None")
 
@@ -68,6 +91,8 @@ class PipelineService:
         try:
             self._enrich_signals(signals)
             self.metrics_service.increment("signals_enriched", len(signals))
+
+            intelligence_results = self._run_revenue_intelligence(signals)
 
             score_results = self.revenue_scoring_service.score_signals(signals)
             self.metrics_service.increment("signals_scored", len(score_results))
@@ -86,11 +111,38 @@ class PipelineService:
 
             morning_brief = self.morning_brief_service.generate_brief(decision_cards)
             self.metrics_service.increment("morning_briefs_generated")
-            return morning_brief
+            return PipelineResult(
+                morning_brief=morning_brief,
+                revenue_intelligence_results=intelligence_results,
+            )
         finally:
             duration_ms = int((perf_counter() - started_at) * 1000)
             self.metrics_service.record_duration_ms("pipeline_duration_ms", duration_ms)
             logger.info("pipeline_finished pipeline_duration_ms=%s", duration_ms)
+
+    def _run_revenue_intelligence(
+        self,
+        signals: list[Signal],
+    ) -> list[RevenueIntelligenceResult] | None:
+        """Запускает Engine изолированно; его сбой не прерывает существующий Pipeline."""
+        if self.revenue_intelligence_engine is None:
+            return None
+
+        results: list[RevenueIntelligenceResult] = []
+        for signal in signals:
+            try:
+                results.append(
+                    self.revenue_intelligence_engine.process(
+                        RevenueIntelligenceInput.from_signal(signal)
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "revenue_intelligence_failed signal_id=%s",
+                    signal.signal_id,
+                )
+
+        return results
 
     def _enrich_signals(self, signals: list[Signal]) -> None:
         """Добавляет Intelligence Layer, не меняя доменные поля сигналов."""
@@ -121,7 +173,12 @@ class PipelineService:
                 )
 
             signal = signals_by_id.get(filter_result.signal_id)
-            signal_data = signal.raw_data if signal is not None else None
+            signal_data = None
+            if signal is not None:
+                # Передаём тип сигнала отдельно от raw_data, чтобы category/card_type
+                # сохранялись корректно даже если source payload не содержит signal_type.
+                signal_data = dict(signal.raw_data)
+                signal_data.setdefault("signal_type", signal.signal_type)
             card_inputs.append((filter_result, score_result, signal_data))
 
         return self.decision_card_service.generate_cards(card_inputs)

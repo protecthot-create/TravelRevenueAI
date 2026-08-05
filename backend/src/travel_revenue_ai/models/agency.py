@@ -30,3 +30,9 @@ class Agency(Base):
         back_populates="agency",
         lazy="selectin",
     )
+
+    decision_cards: Mapped[list["DecisionCard"]] = relationship(
+        "DecisionCard",
+        back_populates="agency",
+        lazy="selectin",
+    )

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     morning_brief_timezone: str = "Europe/Moscow"
 
     # Feature flags Intelligence Layer. Включены по умолчанию для обратной совместимости.
+    revenue_intelligence_enabled: bool = False
     intelligence_enabled: bool = True
     intelligence_priority_enabled: bool = True
     duplicate_detection_enabled: bool = True

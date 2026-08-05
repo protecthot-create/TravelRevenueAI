@@ -267,12 +267,13 @@ class MorningBriefResult:
 # Шаблоны для выбора главного действия
 # =============================================================================
 
+
 MAIN_ACTION_SELECTION_RULES = """
 Правила выбора главного действия дня:
-1. Риски приоритетнее возможностей при равном score.
-2. Более срочные действия (critical/high priority) важнее средних.
-3. При равной срочности выбираем действие с большим денежным эффектом.
-4. Market insights не выбираются как главное действие.
+1. Сначала сравниваем общий бизнес-приоритет карточки.
+2. Приоритет определяется через score, важность, уверенность и стабильные тай-брейки.
+3. Сравнение всегда происходит только внутри объединенного набора opportunities + risks.
+4. Market insights никогда не выбираются как главное действие.
 """
 
 
@@ -310,11 +311,13 @@ class MorningBriefService:
         """Генерирует MorningBriefResult из списка DecisionCard.
 
         Процесс:
-        1. Разделяет карточки по типам (opportunity, risk, market_insight).
-        2. Сортирует каждую группу по score (descending).
-        3. Выбирает top-5 opportunities, top-3 risks, все market_insights.
-        4. Выбирает главное действие дня (риски приоритетнее).
-        5. Генерирует summary текст.
+        1. Валидирует входные карточки.
+        2. Дедуплицирует карточки.
+        3. Разделяет карточки по типам.
+        4. Сортирует каждую группу по score (descending).
+        5. Ограничивает opportunities и risks лимитами сервиса.
+        6. Выбирает главное действие дня из opportunities + risks по общей политике.
+        7. Генерирует summary текст.
 
         Args:
             cards: Список DecisionCard для включения в бриф.
@@ -334,14 +337,19 @@ class MorningBriefService:
 
         if len(valid_cards) != len(cards):
             invalid_count = len(cards) - len(valid_cards)
-            # Логируем, но не падаем — просто пропускаем невалидные
-            pass
+            # Невалидные карточки тихо пропускаем, чтобы не ломать генерацию брифа.
+            _ = invalid_count
+
+        # Сначала убираем дубликаты, потом строим итоговые группы.
+        deduplicated_cards = self._deduplicate_cards(valid_cards)
 
         # Разделяем по типам
-        opportunities = self._filter_by_type(valid_cards, DecisionCardType.opportunity)
-        risks = self._filter_by_type(valid_cards, DecisionCardType.risk)
+        opportunities = self._filter_by_type(
+            deduplicated_cards, DecisionCardType.opportunity
+        )
+        risks = self._filter_by_type(deduplicated_cards, DecisionCardType.risk)
         market_insights = self._filter_by_type(
-            valid_cards, DecisionCardType.market_insight
+            deduplicated_cards, DecisionCardType.market_insight
         )
 
         # Сортируем по score (descending)
@@ -398,30 +406,80 @@ class MorningBriefService:
         opportunities: list[DecisionCard],
         risks: list[DecisionCard],
     ) -> DecisionCard | None:
-        """Выбирает главное действие дня.
+        """Выбирает главное действие дня по общей бизнес-приоритетной политике.
 
-        Правила:
-        1. Если есть риски — берём самый приоритетный риск.
-        2. Если нет рисков — берём самую приоритетную возможность.
-        3. При равном приоритете выбираем по score.
-        4. Market insights не выбираются как главное действие.
-
-        Args:
-            opportunities: Отсортированный список возможностей.
-            risks: Отсортированный список рисков.
-
-        Returns:
-            DecisionCard для главного действия или None.
+        В выбор входят только итоговые opportunities и risks.
+        Market insights никогда не участвуют в выборе главного действия.
         """
-        # Приоритет рисков
-        if risks:
-            return risks[0]
+        candidates = [*risks, *opportunities]
 
-        # Если нет рисков — берём возможность
-        if opportunities:
-            return opportunities[0]
+        if not candidates:
+            return None
 
-        return None
+        return max(candidates, key=self._business_priority_key)
+
+    def _business_priority_key(
+        self,
+        card: DecisionCard,
+    ) -> tuple[float, int, float, datetime, uuid.UUID]:
+        """Возвращает детерминированный ключ бизнес-приоритета.
+
+        Порядок сравнения:
+        1. score
+        2. importance_label
+        3. confidence_raw
+        4. generated_at
+        5. decision_card_id
+        """
+        return (
+            card.score,
+            self._priority_label_rank(card.importance_label),
+            card.confidence_raw,
+            card.generated_at,
+            card.decision_card_id,
+        )
+
+    def _priority_label_rank(self, importance_label: ImportanceLabel) -> int:
+        """Преобразует importance_label в числовой ранг."""
+        priority_map = {
+            ImportanceLabel.critical: 4,
+            ImportanceLabel.high: 3,
+            ImportanceLabel.medium: 2,
+            ImportanceLabel.low: 1,
+        }
+        return priority_map.get(importance_label, 0)
+
+    def _deduplicate_cards(
+        self,
+        cards: list[DecisionCard],
+    ) -> list[DecisionCard]:
+        """Удаляет дубликаты карточек, сохраняя лучшую по бизнес-приоритету."""
+        deduplicated: dict[str, DecisionCard] = {}
+
+        for card in cards:
+            key = self._build_dedup_key(card)
+            existing = deduplicated.get(key)
+            if existing is None or self._is_better_card(card, existing):
+                deduplicated[key] = card
+
+        return list(deduplicated.values())
+
+    def _build_dedup_key(self, card: DecisionCard) -> str:
+        """Строит ключ дедупликации для карточки."""
+        if card.signal_id is not None:
+            return f"signal:{card.signal_id}"
+
+        parts = [
+            card.card_type.value,
+            card.title.strip().lower(),
+            card.what_to_do.strip().lower(),
+            card.summary.strip().lower(),
+        ]
+        return "|".join(parts)
+
+    def _is_better_card(self, current: DecisionCard, existing: DecisionCard) -> bool:
+        """Определяет, какая из двух карточек лучше."""
+        return self._business_priority_key(current) > self._business_priority_key(existing)
 
     def generate_brief_from_filtered(
         self,

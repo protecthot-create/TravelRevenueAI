@@ -5,11 +5,12 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from travel_revenue_ai.models.base import Base
+from travel_revenue_ai.models.mixins import TimestampMixin
 
 
 class DataSourceTypeEnum(str, enum.Enum):
@@ -31,7 +32,7 @@ class SyncStatusEnum(str, enum.Enum):
     disabled = "disabled"
 
 
-class DataSource(Base):
+class DataSource(TimestampMixin, Base):
     """Конфигурация подключаемого источника данных агентства.
 
     Модель определяет только структуру ORM. Миграция таблицы и подключение
@@ -67,18 +68,6 @@ class DataSource(Base):
         default=SyncStatusEnum.never_synced,
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
     agency: Mapped["Agency"] = relationship(
         "Agency",
         lazy="selectin",

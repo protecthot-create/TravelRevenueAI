@@ -1,7 +1,11 @@
 """API управления конфигурациями и состоянием источников данных."""
 
+from datetime import date
 import uuid
 from typing import Annotated
+
+from travel_revenue_ai.composition import build_source_collection_service
+from travel_revenue_ai.schemas.persisted_morning_brief import BriefTriggerType
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -86,6 +90,31 @@ def create_source(
 ) -> DataSourceResponse:
     """Сохраняет конфигурацию источника; секреты не попадают в ответ."""
     return _to_response(DataSourceService(db).create_source(data))
+
+
+@router.post(
+    "/collect",
+    summary="Запустить ручной сбор источников и формирование брифов",
+)
+def collect_sources(
+    db: Annotated[Session, Depends(get_db)],
+    brief_date: date | None = Query(default=None),
+    run_id: str | None = Query(default=None, max_length=128),
+) -> dict[str, object]:
+    """Собирает enabled-источники и возвращает только безопасную сводку запуска."""
+    result = build_source_collection_service(db).collect_and_generate_morning_brief(
+        brief_date=brief_date,
+        trigger_type=BriefTriggerType.manual,
+        run_id=run_id,
+    )
+    return {
+        "collected_count": result.collected_count,
+        "saved_count": result.saved_count,
+        "errors_count": result.errors_count,
+        "persisted_brief_agency_ids": [
+            str(agency_id) for agency_id in result.persisted_briefs
+        ],
+    }
 
 
 @router.get(

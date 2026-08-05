@@ -1,0 +1,101 @@
+name: travel-revenue-ai
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-travel_revenue_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-travel_revenue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - travel_revenue_network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-travel_revenue}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-travel_revenue_ai}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?SECRET_ENCRYPTION_KEY must be set}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MORNING_BRIEF_RUN_TIME: ${MORNING_BRIEF_RUN_TIME:-08:00}
+      MORNING_BRIEF_TIMEZONE: ${MORNING_BRIEF_TIMEZONE:-Europe/Moscow}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - travel_revenue_network
+    restart: "no"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-travel_revenue}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-travel_revenue_ai}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?SECRET_ENCRYPTION_KEY must be set}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MORNING_BRIEF_RUN_TIME: ${MORNING_BRIEF_RUN_TIME:-08:00}
+      MORNING_BRIEF_TIMEZONE: ${MORNING_BRIEF_TIMEZONE:-Europe/Moscow}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    networks:
+      - travel_revenue_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    networks:
+      - travel_revenue_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  travel_revenue_network:
+    driver: bridge

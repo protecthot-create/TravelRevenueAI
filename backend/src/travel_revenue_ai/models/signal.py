@@ -11,12 +11,13 @@ import uuid
 from datetime import datetime
 from typing import Any, TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, JSON, func
+from sqlalchemy import Enum, ForeignKey, Index, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.orm import validates
 
 from travel_revenue_ai.models.base import Base
+from travel_revenue_ai.models.mixins import TimestampMixin
 
 
 class SignalTypeEnum(str, enum.Enum):
@@ -38,7 +39,7 @@ class SignalStatusEnum(str, enum.Enum):
     rejected = "rejected"
 
 
-class Signal(Base):
+class Signal(TimestampMixin, Base):
     """Модель Signal — исходный сигнал из источника данных.
 
     Сигнал поступает из Data Source и проходит через конвейер обработки:
@@ -61,7 +62,7 @@ class Signal(Base):
     Связи:
         agency: Агентство-владелец сигнала.
         source: Источник данных сигнала.
-        decision_card: Decision Card, порождённый этим сигналом (опционально).
+        decision_cards: Исторические Decision Card, порождённые этим сигналом.
         action: Действие, связанное с этим сигналом (опционально).
     """
 
@@ -117,22 +118,6 @@ class Signal(Base):
         comment="Статус обработки: new / normalized / scored / filtered / rejected",
     )
 
-    # Временные метки
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        comment="Дата поступления сигнала",
-    )
-
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-        comment="Дата последнего обновления",
-    )
-
     # Связи (обратные)
     agency: Mapped["Agency"] = relationship(
         "Agency",
@@ -146,10 +131,9 @@ class Signal(Base):
         lazy="selectin",
     )
 
-    decision_card: Mapped[Optional["DecisionCard"]] = relationship(
+    decision_cards: Mapped[list["DecisionCard"]] = relationship(
         "DecisionCard",
         back_populates="signal",
-        uselist=False,
         lazy="selectin",
     )
 

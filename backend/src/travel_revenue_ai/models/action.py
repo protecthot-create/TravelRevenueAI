@@ -1,7 +1,6 @@
 """Stub-модель Action для MVP."""
 
 import uuid
-from typing import Optional
 
 from sqlalchemy import ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
@@ -31,12 +30,5 @@ class Action(Base):
     signal: Mapped["Signal"] = relationship(
         "Signal",
         back_populates="action",
-        lazy="selectin",
-    )
-
-    morning_brief: Mapped[Optional["MorningBrief"]] = relationship(
-        "MorningBrief",
-        back_populates="main_action",
-        uselist=False,
         lazy="selectin",
     )

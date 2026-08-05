@@ -1,291 +1,146 @@
-"""SQLAlchemy-модель MorningBrief для Travel Revenue AI.
+"""SQLAlchemy-модель исторического MorningBrief."""
 
-Morning Brief — ежедневный брифинг, собранный из приоритетных Decision Card.
-Содержит top-возможности, top-риски и главное действие дня.
-
-Spec: docs/data_model.md, секция 5.
-"""
+from __future__ import annotations
 
 import enum
 import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Index, JSON, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    JSON,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.orm import validates
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from travel_revenue_ai.models.base import Base
+from travel_revenue_ai.models.mixins import TimestampMixin
 
 
 class MorningBriefStatusEnum(str, enum.Enum):
-    """Статусы брифа согласно спецификации."""
+    """Статусы отправки и прочтения брифа."""
 
-    draft = "draft"  # Черновик, ещё не отправлен
-    sent = "sent"  # Отправлен пользователю
-    read = "read"  # Прочитан пользователем
+    draft = "draft"
+    sent = "sent"
+    read = "read"
 
 
-class MorningBrief(Base):
-    """Модель MorningBrief — ежедневный брифинг для агентства.
+class MorningBrief(TimestampMixin, Base):
+    """Неизменяемый исторический snapshot утреннего брифа.
 
-    Брифинг формируется из приоритетных Decision Card и содержит:
-    - top-5 возможностей;
-    - top-3 рисков;
-    - главное действие дня;
-    - краткий summary-текст.
-
-    Жизненный цикл:
-    1. draft — бриф сгенерирован, но ещё не отправлен
-    2. sent — отправлен пользователю (email, telegram и т.д.)
-    3. read — пользователь открыл бриф
-
-    Атрибуты:
-        brief_id: Уникальный идентификатор брифа (UUID).
-        agency_id: Ссылка на агентство-владелец.
-        date: Дата брифа (без времени).
-        top_opportunities: Список UUID Decision Card с топ-возможностями (JSON).
-        top_risks: Список UUID Decision Card с топ-рисками (JSON).
-        main_action_id: UUID главного действия дня (nullable).
-        summary_text: Краткий текст брифа для отображения.
-        status: Текущий статус брифа.
-        created_at: Дата и время создания.
-        sent_at: Дата и время отправки (nullable).
-
-    Связи:
-        agency: Агентство-владелец брифа.
-        main_action: Главное действие дня (опционально).
+    Массивы идентификаторов сохраняют порядок выбора карточек. Snapshot-поля
+    намеренно не зависят от будущих изменений live-состояния DecisionCard.
     """
 
     __tablename__ = "morning_briefs"
     __table_args__ = (
-        # Индекс для быстрого поиска брифов по агентству и дате
-        Index("ix_morning_briefs_agency_date", "agency_id", "date"),
-        # Уникальный индекс: один бриф на агентство на дату
+        Index("ix_morning_briefs_agency_date", "agency_id", "date", unique=True),
         Index(
-            "ix_morning_briefs_agency_date_unique",
+            "ix_morning_briefs_agency_idempotency_key",
             "agency_id",
-            "date",
+            "idempotency_key",
             unique=True,
         ),
+        Index("ix_morning_briefs_main_decision_card_id", "main_decision_card_id"),
+        CheckConstraint(
+            "("
+            "main_decision_card_id IS NULL AND main_action_snapshot IS NULL"
+            ") OR ("
+            "main_decision_card_id IS NOT NULL AND main_action_snapshot IS NOT NULL"
+            ")",
+            name="ck_morning_briefs_main_action_snapshot_for_main_card",
+        ),
     )
 
-    # Первичный ключ
     brief_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        comment="Уникальный идентификатор брифа",
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-
-    # Внешний ключ на агентство
     agency_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("agencies.agency_id", ondelete="CASCADE"),
+        ForeignKey("agencies.agency_id", ondelete="RESTRICT"),
         nullable=False,
-        index=True,
-        comment="Ссылка на агентство-владелец",
     )
-
-    # Дата брифа (без времени — один бриф на дату)
-    date: Mapped[date] = mapped_column(
-        Date,
-        nullable=False,
-        comment="Дата брифа",
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
-    # JSON-поля со списками Decision Card
-    top_opportunities: Mapped[list[uuid.UUID]] = mapped_column(
-        JSON,
-        nullable=False,
-        default=list,
-        comment="Список UUID Decision Card с топ-возможностями (top-5)",
-    )
-
-    top_risks: Mapped[list[uuid.UUID]] = mapped_column(
-        JSON,
-        nullable=False,
-        default=list,
-        comment="Список UUID Decision Card с топ-рисками (top-3)",
-    )
-
-    # Главное действие дня (опционально)
-    main_action_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("actions.action_id", ondelete="SET NULL"),
-        nullable=True,
-        comment="UUID главного действия дня",
-    )
-
-    # Текст брифа
-    summary_text: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        comment="Краткий текст брифа для отображения",
-    )
-
-    # Статус брифа
     status: Mapped[MorningBriefStatusEnum] = mapped_column(
-        Enum(
-            MorningBriefStatusEnum,
-            name="morning_brief_status_enum",
-            create_constraint=True,
-        ),
+        Enum(MorningBriefStatusEnum, name="morning_brief_status_enum", create_constraint=True),
         nullable=False,
         default=MorningBriefStatusEnum.draft,
-        comment="Статус: draft / sent / read",
     )
-
-    # Временные метки
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        comment="Дата создания брифа",
-    )
-
-    sent_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
+    main_decision_card_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("decision_cards.decision_card_id", ondelete="RESTRICT"),
         nullable=True,
-        comment="Дата отправки брифа",
     )
 
-    # Связи
+    top_opportunity_card_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    top_risk_card_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    market_insight_card_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    opportunities_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    risks_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    market_insights_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    main_action_snapshot: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    statistics_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    input_signal_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    execution_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    trigger_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    scheduler_job_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    feature_flags_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    engine_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    scoring_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    filtering_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     agency: Mapped["Agency"] = relationship(
-        "Agency",
-        back_populates="morning_briefs",
-        lazy="selectin",
+        "Agency", back_populates="morning_briefs", lazy="selectin"
     )
-
-    main_action: Mapped[Optional["Action"]] = relationship(
-        "Action",
-        back_populates="morning_brief",
-        lazy="selectin",
+    main_decision_card: Mapped[Optional["DecisionCard"]] = relationship(
+        "DecisionCard", foreign_keys=[main_decision_card_id], lazy="selectin"
     )
-
-    # --- Валидаторы ---
-
-    @validates("top_opportunities")
-    def validate_top_opportunities(
-        self, key: str, value: list[uuid.UUID] | list[str]
-    ) -> list[uuid.UUID]:
-        """Проверяет, что top_opportunities — список UUID."""
-        if not isinstance(value, list):
-            raise ValueError("top_opportunities должен быть списком")
-        result: list[uuid.UUID] = []
-        for item in value:
-            if isinstance(item, uuid.UUID):
-                result.append(item)
-            elif isinstance(item, str):
-                try:
-                    result.append(uuid.UUID(item))
-                except ValueError as error:
-                    raise ValueError(
-                        f"Недопустимый UUID в top_opportunities: '{item}'"
-                    ) from error
-            else:
-                raise ValueError(
-                    f"Элемент top_opportunities должен быть UUID или строкой, "
-                    f"получен {type(item).__name__}"
-                )
-        # Ограничиваем top-5 согласно спецификации
-        if len(result) > 5:
-            raise ValueError("top_opportunities не может содержать более 5 элементов")
-        return result
-
-    @validates("top_risks")
-    def validate_top_risks(
-        self, key: str, value: list[uuid.UUID] | list[str]
-    ) -> list[uuid.UUID]:
-        """Проверяет, что top_risks — список UUID."""
-        if not isinstance(value, list):
-            raise ValueError("top_risks должен быть списком")
-        result: list[uuid.UUID] = []
-        for item in value:
-            if isinstance(item, uuid.UUID):
-                result.append(item)
-            elif isinstance(item, str):
-                try:
-                    result.append(uuid.UUID(item))
-                except ValueError as error:
-                    raise ValueError(
-                        f"Недопустимый UUID в top_risks: '{item}'"
-                    ) from error
-            else:
-                raise ValueError(
-                    f"Элемент top_risks должен быть UUID или строкой, "
-                    f"получен {type(item).__name__}"
-                )
-        # Ограничиваем top-3 согласно спецификации
-        if len(result) > 3:
-            raise ValueError("top_risks не может содержать более 3 элементов")
-        return result
-
-    @validates("summary_text")
-    def validate_summary_text(self, key: str, value: str) -> str:
-        """Проверяет, что summary_text не пустой."""
-        if not isinstance(value, str):
-            raise ValueError("summary_text должен быть строкой")
-        if len(value.strip()) == 0:
-            raise ValueError("summary_text не может быть пустым")
-        return value
 
     @validates("status")
     def validate_status(
         self, key: str, value: MorningBriefStatusEnum | str
     ) -> MorningBriefStatusEnum:
-        """Проверяет допустимость статуса брифа."""
-        if isinstance(value, str):
-            try:
-                return MorningBriefStatusEnum(value)
-            except ValueError as error:
-                raise ValueError(
-                    f"Недопустимый статус брифа: '{value}'. "
-                    f"Допустимые: {[s.value for s in MorningBriefStatusEnum]}"
-                ) from error
-        return value
-
-    # --- Методы-геттеры ---
+        """Нормализует строковое значение статуса."""
+        return MorningBriefStatusEnum(value)
 
     @property
     def opportunities_count(self) -> int:
-        """Возвращает количество возможностей в брифе."""
-        return len(self.top_opportunities)
+        """Возвращает число opportunity-карточек."""
+        return len(self.top_opportunity_card_ids)
 
     @property
     def risks_count(self) -> int:
-        """Возвращает количество рисков в брифе."""
-        return len(self.top_risks)
-
-    @property
-    def is_draft(self) -> bool:
-        """Проверяет, является ли бриф черновиком."""
-        return self.status == MorningBriefStatusEnum.draft
-
-    @property
-    def is_sent(self) -> bool:
-        """Проверяет, отправлен ли бриф."""
-        return self.status == MorningBriefStatusEnum.sent
-
-    @property
-    def is_read(self) -> bool:
-        """Проверяет, прочитан ли бриф."""
-        return self.status == MorningBriefStatusEnum.read
-
-    def __repr__(self) -> str:
-        """Строковое представление для отладки."""
-        return (
-            f"<MorningBrief(id={self.brief_id}, "
-            f"agency={self.agency_id}, "
-            f"date={self.date}, "
-            f"status={self.status.value}, "
-            f"opportunities={self.opportunities_count}, "
-            f"risks={self.risks_count})>"
-        )
+        """Возвращает число risk-карточек."""
+        return len(self.top_risk_card_ids)
 
 
-# Импорт для избежания циклических зависимостей
 if TYPE_CHECKING:
     from travel_revenue_ai.models.agency import Agency
-    from travel_revenue_ai.models.action import Action
+    from travel_revenue_ai.models.decision_card import DecisionCard

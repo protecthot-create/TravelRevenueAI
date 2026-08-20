@@ -30,6 +30,7 @@ from travel_revenue_ai.revenue_intelligence.recommendation_builder import (
 from travel_revenue_ai.revenue_intelligence.revenue_estimator import (
     RuleBasedRevenueEstimator,
 )
+from travel_revenue_ai.services.morning_brief_read_service import MorningBriefReadService
 from travel_revenue_ai.services.persisted_morning_brief_service import (
     PersistedMorningBriefService,
 )
@@ -96,6 +97,13 @@ def build_source_collection_service(
             app_settings,
         ),
     )
+
+
+def build_morning_brief_read_service(
+    session: Session,
+) -> MorningBriefReadService:
+    """Собирает read-only сервис persisted MorningBrief для одного HTTP-запроса."""
+    return MorningBriefReadService(session=session)
 
 
 def build_persisted_morning_brief_service(

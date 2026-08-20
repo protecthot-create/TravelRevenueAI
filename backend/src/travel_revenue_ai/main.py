@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from travel_revenue_ai.api.v1 import (
     decision_cards_router,
+    morning_brief_history_router,
     morning_brief_router,
     signals_router,
     sources_router,
@@ -44,6 +45,7 @@ app = FastAPI(
 # Регистрация API routers
 app.include_router(signals_router, prefix="/api/v1")
 app.include_router(morning_brief_router, prefix="/api/v1")
+app.include_router(morning_brief_history_router, prefix="/api/v1")
 app.include_router(decision_cards_router, prefix="/api/v1")
 app.include_router(sources_router, prefix="/api/v1")
 

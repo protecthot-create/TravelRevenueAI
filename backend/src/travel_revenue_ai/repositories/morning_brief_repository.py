@@ -20,6 +20,27 @@ class MorningBriefRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def get_brief_by_id(self, brief_id: uuid.UUID) -> MorningBrief | None:
+        """Загружает persisted бриф по идентификатору."""
+        statement = select(MorningBrief).where(MorningBrief.brief_id == brief_id)
+        return self.session.scalar(statement)
+
+    def list_briefs_by_agency(
+        self,
+        agency_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[MorningBrief]:
+        """Загружает страницу historical briefs агентства, начиная с новых."""
+        statement = (
+            select(MorningBrief)
+            .where(MorningBrief.agency_id == agency_id)
+            .order_by(MorningBrief.created_at.desc(), MorningBrief.brief_id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(self.session.scalars(statement))
+
     def find_brief_by_idempotency_key(
         self,
         *,
@@ -82,6 +103,24 @@ class MorningBriefRepository:
             signals_by_id[signal_id]
             for signal_id in signal_ids
             if signal_id in signals_by_id
+        ]
+
+    def load_decision_cards_by_ids_ordered(
+        self,
+        card_ids: Sequence[uuid.UUID],
+    ) -> list[DecisionCard]:
+        """Загружает карточки в точном порядке входного списка идентификаторов."""
+        if not card_ids:
+            return []
+        statement = select(DecisionCard).where(DecisionCard.decision_card_id.in_(card_ids))
+        cards_by_id = {
+            card.decision_card_id: card
+            for card in self.session.scalars(statement)
+        }
+        return [
+            cards_by_id[card_id]
+            for card_id in card_ids
+            if card_id in cards_by_id
         ]
 
     def get_decision_card_by_id(

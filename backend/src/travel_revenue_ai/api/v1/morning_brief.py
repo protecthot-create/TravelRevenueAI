@@ -12,19 +12,26 @@ from datetime import date
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from travel_revenue_ai.composition import (
+    build_morning_brief_read_service,
     build_persisted_morning_brief_service,
     build_pipeline_service,
 )
 from travel_revenue_ai.database import get_db
+from travel_revenue_ai.models.decision_card import DecisionCard
 from travel_revenue_ai.models.signal import Signal
 from travel_revenue_ai.schemas.decision_card_feedback import (
     DecisionCardFeedbackRequest,
     DecisionCardFeedbackResponse,
+)
+from travel_revenue_ai.schemas.morning_brief_read import (
+    MorningBriefDecisionCardDTO,
+    MorningBriefHistoryItemDTO,
+    MorningBriefReadDTO,
 )
 from travel_revenue_ai.schemas.persisted_morning_brief import (
     BriefTriggerType,
@@ -35,6 +42,15 @@ from travel_revenue_ai.schemas.signal import SignalCreate
 from travel_revenue_ai.services.decision_card_feedback_service import (
     DecisionCardFeedbackNotFoundError,
     DecisionCardFeedbackService,
+)
+from travel_revenue_ai.services.morning_brief_read_errors import (
+    MorningBriefReadIntegrityError,
+    MorningBriefReadNotFoundError,
+    MorningBriefReadPersistenceError,
+)
+from travel_revenue_ai.services.morning_brief_read_service import (
+    MorningBriefHistoryItem,
+    MorningBriefReadResult,
 )
 from travel_revenue_ai.services.persisted_morning_brief_errors import (
     BusinessDateConflictError,
@@ -54,6 +70,7 @@ router = APIRouter(
 )
 
 decision_cards_router = APIRouter(tags=["decision-cards"])
+morning_brief_history_router = APIRouter(tags=["morning-brief"])
 
 
 class PersistedMorningBriefCreateDTO(BaseModel):
@@ -188,6 +205,85 @@ def _raise_decision_card_feedback_http_error(error: Exception) -> None:
     )
 
 
+def _to_read_card(card: DecisionCard) -> MorningBriefDecisionCardDTO:
+    """Преобразует persisted карточку в разрешённый публичный DTO."""
+    return MorningBriefDecisionCardDTO(
+        decision_card_id=card.decision_card_id,
+        card_type=card.card_type,
+        title=card.title,
+        summary=card.summary,
+        why_it_matters=card.why_it_matters,
+        what_to_do=card.what_to_do,
+        deadline=card.deadline,
+        money_effect_display=card.money_effect_display,
+        score=card.score,
+        confidence=card.confidence,
+        priority=card.priority,
+        status=card.status,
+        feedback_state=card.feedback_state,
+    )
+
+
+def _to_read_response(result: MorningBriefReadResult) -> MorningBriefReadDTO:
+    """Строит публичный DTO брифа, сохраняя порядок карточек сервиса."""
+    brief = result.brief
+    return MorningBriefReadDTO(
+        brief_id=brief.brief_id,
+        agency_id=brief.agency_id,
+        brief_date=brief.date,
+        generated_at=brief.generated_at,
+        status=brief.status.value,
+        summary_text=brief.summary_text,
+        opportunity_cards=[_to_read_card(card) for card in result.opportunity_cards],
+        risk_cards=[_to_read_card(card) for card in result.risk_cards],
+        market_insight_cards=[_to_read_card(card) for card in result.market_insight_cards],
+        main_decision_card=(
+            _to_read_card(result.main_decision_card)
+            if result.main_decision_card is not None
+            else None
+        ),
+    )
+
+
+def _to_history_response(item: MorningBriefHistoryItem) -> MorningBriefHistoryItemDTO:
+    """Строит публичный metadata-only DTO исторической записи."""
+    brief = item.brief
+    return MorningBriefHistoryItemDTO(
+        brief_id=brief.brief_id,
+        brief_date=brief.date,
+        generated_at=brief.generated_at,
+        status=brief.status.value,
+        summary_text=brief.summary_text,
+        opportunity_count=item.opportunity_count,
+        risk_count=item.risk_count,
+        market_insight_count=item.market_insight_count,
+        total_card_count=item.total_card_count,
+    )
+
+
+def _raise_morning_brief_read_http_error(error: Exception) -> None:
+    """Преобразует typed read errors в стабильные и безопасные HTTP-ответы."""
+    if isinstance(error, MorningBriefReadNotFoundError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="morning_brief_not_found",
+        )
+    if isinstance(error, MorningBriefReadIntegrityError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="morning_brief_integrity_error",
+        )
+    if isinstance(error, MorningBriefReadPersistenceError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="morning_brief_unavailable",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="internal_server_error",
+    )
+
+
 @router.post(
     "/generate",
     response_model=dict[str, Any],
@@ -225,6 +321,58 @@ def create_persisted_morning_brief(
         _raise_persisted_http_error(error)
         raise AssertionError("Недостижимый код")
     return _to_persisted_response(result)
+
+
+@router.get(
+    "/{brief_id}",
+    response_model=MorningBriefReadDTO,
+    status_code=status.HTTP_200_OK,
+    summary="Получить persisted утренний бриф",
+)
+def get_persisted_morning_brief(
+    brief_id: UUID,
+    agency_id: UUID = Query(description="Идентификатор агентства-владельца"),
+    db: Session = Depends(get_db),
+) -> MorningBriefReadDTO:
+    """Возвращает persisted бриф только владельцу, не изменяя состояние базы."""
+    service = build_morning_brief_read_service(db)
+    try:
+        result = service.get_brief(brief_id=brief_id, agency_id=agency_id)
+    except Exception as error:
+        _raise_morning_brief_read_http_error(error)
+        raise AssertionError("Недостижимый код")
+    return _to_read_response(result)
+
+
+@morning_brief_history_router.get(
+    "/agencies/{agency_id}/morning-briefs",
+    response_model=list[MorningBriefHistoryItemDTO],
+    status_code=status.HTTP_200_OK,
+    summary="Получить историю persisted утренних брифов",
+)
+def list_persisted_morning_brief_history(
+    agency_id: UUID,
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Максимальное количество брифов в ответе",
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Количество брифов, которые нужно пропустить",
+    ),
+    db: Session = Depends(get_db),
+) -> list[MorningBriefHistoryItemDTO]:
+    """Возвращает metadata-only историю агентства без загрузки DecisionCard."""
+    service = build_morning_brief_read_service(db)
+    try:
+        items = service.list_history(agency_id=agency_id, limit=limit, offset=offset)
+    except Exception as error:
+        _raise_morning_brief_read_http_error(error)
+        raise AssertionError("Недостижимый код")
+    return [_to_history_response(item) for item in items]
 
 
 @decision_cards_router.post(

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import uuid
 from datetime import date
@@ -135,6 +136,45 @@ def _request(agency: Agency, signals: list[Signal], suffix: str) -> PersistedMor
         signal_ids=tuple(signal.signal_id for signal in signals),
         idempotency_key=f"rc3-cs2-{suffix}-{uuid.uuid4()}",
     )
+
+
+def _decision_card_immutable_snapshot(card: DecisionCard) -> dict[str, object]:
+    """Возвращает поля карточки, которые feedback не вправе менять."""
+    return {
+        "title": card.title,
+        "summary": card.summary,
+        "why_it_matters": card.why_it_matters,
+        "what_to_do": card.what_to_do,
+        "deadline": card.deadline,
+        "money_effect_raw": card.money_effect_raw,
+        "currency": card.currency,
+        "money_effect_display": card.money_effect_display,
+        "score": card.score,
+        "confidence": card.confidence,
+        "priority": card.priority,
+        "reasoning": card.reasoning,
+        "score_breakdown": deepcopy(card.score_breakdown),
+        "audit_metadata": deepcopy(card.audit_metadata),
+        "generated_at": card.generated_at,
+        "execution_id": card.execution_id,
+        "engine_version": card.engine_version,
+        "scoring_version": card.scoring_version,
+        "filtering_version": card.filtering_version,
+    }
+
+
+def _morning_brief_snapshot(brief: MorningBrief) -> dict[str, object]:
+    """Возвращает persisted snapshots, не связанные с feedback карточки."""
+    return {
+        "opportunities_snapshot": deepcopy(brief.opportunities_snapshot),
+        "risks_snapshot": deepcopy(brief.risks_snapshot),
+        "market_insights_snapshot": deepcopy(brief.market_insights_snapshot),
+        "main_action_snapshot": deepcopy(brief.main_action_snapshot),
+        "summary_snapshot": deepcopy(brief.summary_snapshot),
+        "statistics_snapshot": deepcopy(brief.statistics_snapshot),
+        "input_signal_ids": deepcopy(brief.input_signal_ids),
+        "feature_flags_snapshot": deepcopy(brief.feature_flags_snapshot),
+    }
 
 
 class _MutatingPipeline:
@@ -339,25 +379,11 @@ def test_decision_card_feedback_service_updates_only_lifecycle_fields(
             select(DecisionCard).where(DecisionCard.decision_card_id == decision_card_id)
         )
         assert original_card is not None
-        original_snapshot = {
-            "title": original_card.title,
-            "summary": original_card.summary,
-            "why_it_matters": original_card.why_it_matters,
-            "what_to_do": original_card.what_to_do,
-            "deadline": original_card.deadline,
-            "money_effect_raw": original_card.money_effect_raw,
-            "currency": original_card.currency,
-            "money_effect_display": original_card.money_effect_display,
-            "score": original_card.score,
-            "confidence": original_card.confidence,
-            "priority": original_card.priority,
-            "reasoning": original_card.reasoning,
-            "score_breakdown": dict(original_card.score_breakdown),
-            "audit_metadata": dict(original_card.audit_metadata),
-        }
+        original_snapshot = _decision_card_immutable_snapshot(original_card)
 
         feedback_result = feedback_service.apply_feedback(
             decision_card_id=decision_card_id,
+            agency_id=agency.agency_id,
             feedback_state=feedback_state,
         )
 
@@ -371,22 +397,7 @@ def test_decision_card_feedback_service_updates_only_lifecycle_fields(
         assert feedback_result.feedback_state == feedback_state.value
         assert updated_card.status == expected_status
         assert updated_card.feedback_state == feedback_state.value
-        assert {
-            "title": updated_card.title,
-            "summary": updated_card.summary,
-            "why_it_matters": updated_card.why_it_matters,
-            "what_to_do": updated_card.what_to_do,
-            "deadline": updated_card.deadline,
-            "money_effect_raw": updated_card.money_effect_raw,
-            "currency": updated_card.currency,
-            "money_effect_display": updated_card.money_effect_display,
-            "score": updated_card.score,
-            "confidence": updated_card.confidence,
-            "priority": updated_card.priority,
-            "reasoning": updated_card.reasoning,
-            "score_breakdown": dict(updated_card.score_breakdown),
-            "audit_metadata": dict(updated_card.audit_metadata),
-        } == original_snapshot
+        assert _decision_card_immutable_snapshot(updated_card) == original_snapshot
     finally:
         _cleanup_agency(db_session, agency.agency_id)
 
@@ -409,6 +420,7 @@ def test_decision_card_feedback_service_raises_not_found_without_writes(
         with pytest.raises(DecisionCardFeedbackNotFoundError):
             feedback_service.apply_feedback(
                 decision_card_id=uuid.uuid4(),
+                agency_id=agency.agency_id,
                 feedback_state=DecisionCardFeedbackState.accepted,
             )
 

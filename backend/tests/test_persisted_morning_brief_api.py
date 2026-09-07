@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import uuid
 from decimal import Decimal
@@ -131,6 +132,45 @@ def _payload(
     }
 
 
+def _decision_card_immutable_snapshot(card: DecisionCard) -> dict[str, object]:
+    """Возвращает поля карточки, которые feedback не вправе менять."""
+    return {
+        "title": card.title,
+        "summary": card.summary,
+        "why_it_matters": card.why_it_matters,
+        "what_to_do": card.what_to_do,
+        "deadline": card.deadline,
+        "money_effect_raw": card.money_effect_raw,
+        "currency": card.currency,
+        "money_effect_display": card.money_effect_display,
+        "score": card.score,
+        "confidence": card.confidence,
+        "priority": card.priority,
+        "reasoning": card.reasoning,
+        "score_breakdown": deepcopy(card.score_breakdown),
+        "audit_metadata": deepcopy(card.audit_metadata),
+        "generated_at": card.generated_at,
+        "execution_id": card.execution_id,
+        "engine_version": card.engine_version,
+        "scoring_version": card.scoring_version,
+        "filtering_version": card.filtering_version,
+    }
+
+
+def _morning_brief_snapshot(brief: MorningBrief) -> dict[str, object]:
+    """Возвращает persisted snapshots, не связанные с feedback карточки."""
+    return {
+        "opportunities_snapshot": deepcopy(brief.opportunities_snapshot),
+        "risks_snapshot": deepcopy(brief.risks_snapshot),
+        "market_insights_snapshot": deepcopy(brief.market_insights_snapshot),
+        "main_action_snapshot": deepcopy(brief.main_action_snapshot),
+        "summary_snapshot": deepcopy(brief.summary_snapshot),
+        "statistics_snapshot": deepcopy(brief.statistics_snapshot),
+        "input_signal_ids": deepcopy(brief.input_signal_ids),
+        "feature_flags_snapshot": deepcopy(brief.feature_flags_snapshot),
+    }
+
+
 def test_persisted_endpoint_creates_rows_snapshots_and_keeps_section_order(
     client: TestClient,
     db_session: Session,
@@ -221,23 +261,11 @@ def test_decision_card_feedback_endpoint_updates_only_lifecycle_fields(
             select(DecisionCard).where(DecisionCard.decision_card_id == decision_card_id)
         )
         assert original_card is not None
-        original_snapshot = {
-            "title": original_card.title,
-            "summary": original_card.summary,
-            "what_to_do": original_card.what_to_do,
-            "why_it_matters": original_card.why_it_matters,
-            "deadline": original_card.deadline,
-            "money_effect_raw": original_card.money_effect_raw,
-            "score": original_card.score,
-            "confidence": original_card.confidence,
-            "priority": original_card.priority,
-            "reasoning": original_card.reasoning,
-            "score_breakdown": dict(original_card.score_breakdown),
-            "audit_metadata": dict(original_card.audit_metadata),
-        }
+        original_snapshot = _decision_card_immutable_snapshot(original_card)
 
         feedback_response = client.post(
             f"/api/v1/decision-cards/{decision_card_id}/feedback",
+            params={"agency_id": str(agency.agency_id)},
             json={"feedback_state": "accepted"},
         )
 
@@ -253,20 +281,7 @@ def test_decision_card_feedback_endpoint_updates_only_lifecycle_fields(
         assert updated_card is not None
         assert updated_card.status == "active"
         assert updated_card.feedback_state == "accepted"
-        assert {
-            "title": updated_card.title,
-            "summary": updated_card.summary,
-            "what_to_do": updated_card.what_to_do,
-            "why_it_matters": updated_card.why_it_matters,
-            "deadline": updated_card.deadline,
-            "money_effect_raw": updated_card.money_effect_raw,
-            "score": updated_card.score,
-            "confidence": updated_card.confidence,
-            "priority": updated_card.priority,
-            "reasoning": updated_card.reasoning,
-            "score_breakdown": dict(updated_card.score_breakdown),
-            "audit_metadata": dict(updated_card.audit_metadata),
-        } == original_snapshot
+        assert _decision_card_immutable_snapshot(updated_card) == original_snapshot
     finally:
         _cleanup_agency(db_session, agency.agency_id)
 
@@ -277,11 +292,72 @@ def test_decision_card_feedback_endpoint_returns_404_for_unknown_card(
     """Неизвестная карточка получает стабильный 404 without domain leak."""
     response = client.post(
         f"/api/v1/decision-cards/{uuid.uuid4()}/feedback",
+        params={"agency_id": str(uuid.uuid4())},
         json={"feedback_state": "accepted"},
     )
 
     assert response.status_code == 404
     assert response.json()["detail"] == "decision_card_not_found"
+
+
+def test_decision_card_feedback_endpoint_returns_404_without_mutating_foreign_card(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """Чужая карточка не раскрывается и остаётся полностью неизменной."""
+    agency, signals = _create_agency_and_signals(db_session)
+    foreign_agency = Agency()
+    db_session.add(foreign_agency)
+    db_session.commit()
+    try:
+        create_response = client.post(
+            "/api/v1/morning-brief/persisted",
+            json=_payload(agency, signals),
+        )
+        assert create_response.status_code == 201
+        brief_id = uuid.UUID(create_response.json()["brief_id"])
+        decision_card_id = uuid.UUID(
+            create_response.json()["decision_card_groups"][0]["decision_card_ids"][0]
+        )
+
+        original_card = db_session.scalar(
+            select(DecisionCard).where(DecisionCard.decision_card_id == decision_card_id)
+        )
+        original_brief = db_session.scalar(
+            select(MorningBrief).where(MorningBrief.brief_id == brief_id)
+        )
+        assert original_card is not None
+        assert original_brief is not None
+        original_status = original_card.status
+        original_feedback_state = original_card.feedback_state
+        original_card_snapshot = _decision_card_immutable_snapshot(original_card)
+        original_brief_snapshot = _morning_brief_snapshot(original_brief)
+
+        response = client.post(
+            f"/api/v1/decision-cards/{decision_card_id}/feedback",
+            params={"agency_id": str(foreign_agency.agency_id)},
+            json={"feedback_state": "completed"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "decision_card_not_found"
+
+        db_session.expire_all()
+        updated_card = db_session.scalar(
+            select(DecisionCard).where(DecisionCard.decision_card_id == decision_card_id)
+        )
+        updated_brief = db_session.scalar(
+            select(MorningBrief).where(MorningBrief.brief_id == brief_id)
+        )
+        assert updated_card is not None
+        assert updated_brief is not None
+        assert updated_card.status == original_status
+        assert updated_card.feedback_state == original_feedback_state
+        assert _decision_card_immutable_snapshot(updated_card) == original_card_snapshot
+        assert _morning_brief_snapshot(updated_brief) == original_brief_snapshot
+    finally:
+        _cleanup_agency(db_session, foreign_agency.agency_id)
+        _cleanup_agency(db_session, agency.agency_id)
 
 
 def test_decision_card_feedback_endpoint_rejects_invalid_dto_value(
@@ -290,6 +366,7 @@ def test_decision_card_feedback_endpoint_rejects_invalid_dto_value(
     """HTTP-слой валидирует только DTO enum для feedback_state."""
     response = client.post(
         f"/api/v1/decision-cards/{uuid.uuid4()}/feedback",
+        params={"agency_id": str(uuid.uuid4())},
         json={"feedback_state": "invalid"},
     )
 

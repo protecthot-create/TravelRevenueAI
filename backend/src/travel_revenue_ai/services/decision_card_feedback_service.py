@@ -47,12 +47,13 @@ class DecisionCardFeedbackService:
         self,
         *,
         decision_card_id: uuid.UUID,
+        agency_id: uuid.UUID,
         feedback_state: DecisionCardFeedbackState,
     ) -> DecisionCardFeedbackResult:
-        """Обновляет только lifecycle-поля карточки и фиксирует их одной транзакцией."""
+        """Обновляет lifecycle-поля только карточки указанного агентства."""
         try:
             card = self.repository.get_decision_card_by_id(decision_card_id)
-            if card is None:
+            if card is None or card.agency_id != agency_id:
                 raise DecisionCardFeedbackNotFoundError(str(decision_card_id))
 
             self._apply_lifecycle_feedback(card, feedback_state)

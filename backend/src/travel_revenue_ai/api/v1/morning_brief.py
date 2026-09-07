@@ -384,6 +384,7 @@ def list_persisted_morning_brief_history(
 def save_decision_card_feedback(
     decision_card_id: UUID,
     payload: DecisionCardFeedbackRequest,
+    agency_id: UUID = Query(description="Идентификатор агентства-владельца"),
     db: Session = Depends(get_db),
 ) -> DecisionCardFeedbackResponse:
     """Сохраняет MVP feedback, изменяя только существующие lifecycle-поля."""
@@ -391,6 +392,7 @@ def save_decision_card_feedback(
     try:
         result = service.apply_feedback(
             decision_card_id=decision_card_id,
+            agency_id=agency_id,
             feedback_state=payload.feedback_state,
         )
     except Exception as error:

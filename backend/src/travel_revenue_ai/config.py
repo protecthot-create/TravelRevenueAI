@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # Безопасность
     # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     secret_encryption_key: str | None = None
+    clerk_jwt_key: str | None = None
+    clerk_secret_key: str | None = None
+    clerk_issuer: str | None = None
+    clerk_audience: str | None = None
+    clerk_authorized_parties: list[str] | None = None
 
     # База данных
     # SQLite для MVP (по умолчанию), PostgreSQL для production

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from travel_revenue_ai.config import Settings, settings
 from travel_revenue_ai.security.secrets import SecretService
 from travel_revenue_ai.services.data_source_service import DataSourceService
+from travel_revenue_ai.services.identity_resolution_service import IdentityResolutionService
 from travel_revenue_ai.services.signal_service import SignalService
 from travel_revenue_ai.services.source_collection_service import SourceCollectionService
 from travel_revenue_ai.sources.default_providers import register_default_providers
@@ -104,6 +105,13 @@ def build_morning_brief_read_service(
 ) -> MorningBriefReadService:
     """Собирает read-only сервис persisted MorningBrief для одного HTTP-запроса."""
     return MorningBriefReadService(session=session)
+
+
+def build_identity_resolution_service(
+    session: Session,
+) -> IdentityResolutionService:
+    """Собирает read-only resolver identity для одного запроса."""
+    return IdentityResolutionService(session=session)
 
 
 def build_persisted_morning_brief_service(

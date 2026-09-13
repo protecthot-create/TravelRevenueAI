@@ -14,6 +14,7 @@
     - [будущие сервисы: DecisionCardService, MorningBriefService и т.д.]
 """
 
+from travel_revenue_ai.services.identity_resolution_service import IdentityResolutionService
 from travel_revenue_ai.services.filtering_service import (
     DefaultFilteringStrategy,
     FilterDecision,
@@ -57,6 +58,8 @@ from travel_revenue_ai.services.source_collection_service import (
 )
 
 __all__ = [
+    # Identity Resolution
+    "IdentityResolutionService",
     # Signal Service
     "SignalService",
     # Decision Card

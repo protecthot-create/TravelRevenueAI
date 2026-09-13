@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
+from travel_revenue_ai.security.clerk_auth import get_current_principal
+from travel_revenue_ai.security.principal import Principal
 from travel_revenue_ai.models.agency import Agency
 from travel_revenue_ai.models.decision_card import DecisionCard
 from travel_revenue_ai.models.morning_brief import MorningBrief
@@ -64,7 +66,11 @@ def client(db_session: Session) -> Iterator[TestClient]:
     def override_get_db() -> Iterator[Session]:
         yield db_session
 
+    def override_get_current_principal() -> Principal:
+        return Principal(subject_id="test-user", issuer="https://clerk.example.test")
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_principal] = override_get_current_principal
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
     app.dependency_overrides.clear()

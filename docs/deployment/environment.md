@@ -15,6 +15,20 @@
 | `MORNING_BRIEF_TIMEZONE` | нет | Часовой пояс, по умолчанию `Europe/Moscow` |
 | `FRONTEND_PORT` | нет | Внешний порт frontend, по умолчанию `8080` |
 
+## Аутентификация через Clerk
+
+Для backend API задаются следующие переменные:
+
+| Переменная | Обязательна | Назначение |
+|---|---:|---|
+| `CLERK_JWT_KEY` | один из ключей | Предпочтительный ключ проверки JWT |
+| `CLERK_SECRET_KEY` | fallback | Ключ для получения JWKS через Clerk |
+| `CLERK_ISSUER` | да для защищённых API | Ожидаемый issuer session token |
+| `CLERK_AUDIENCE` | нет | Дополнительная проверка audience |
+| `CLERK_AUTHORIZED_PARTIES` | рекомендуется | JSON-массив разрешённых `azp` |
+
+Backend принимает только `Authorization: Bearer <session_token>`. Cookie-only `__session` не используется.
+
 ## Development
 
 Development использует SQLite без Docker PostgreSQL:

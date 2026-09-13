@@ -100,7 +100,7 @@ async def _authenticate_request(request: Request) -> Principal:
     )
 
 
-async def require_principal(request: Request) -> Principal:
+async def get_current_principal(request: Request) -> Principal:
     """Преобразует внутреннюю auth-ошибку в единый HTTP 401."""
     try:
         return await _authenticate_request(request)
@@ -110,3 +110,7 @@ async def require_principal(request: Request) -> Principal:
             extra={"event": _AUTHENTICATION_FAILED_EVENT},
         )
         return _authentication_required()
+
+
+# Совместимый alias для существующих изолированных consumers и тестов.
+require_principal = get_current_principal

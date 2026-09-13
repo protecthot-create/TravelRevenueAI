@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
+from travel_revenue_ai.security.clerk_auth import get_current_principal
+from travel_revenue_ai.security.principal import Principal
 from travel_revenue_ai.models.data_source import DataSourceTypeEnum, SyncStatusEnum
 from travel_revenue_ai.security.secrets import SecretService
 from travel_revenue_ai.services.source_health_service import (
@@ -178,7 +180,11 @@ def test_collect_sources_endpoint_returns_safe_runtime_summary(
     def override_get_db() -> object:
         yield object()
 
+    def override_get_current_principal() -> Principal:
+        return Principal(subject_id="test-user", issuer="https://clerk.example.test")
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_principal] = override_get_current_principal
     try:
         with TestClient(app) as client:
             response = client.post(

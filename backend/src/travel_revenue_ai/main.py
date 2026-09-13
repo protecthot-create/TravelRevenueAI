@@ -3,7 +3,7 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, Response, status
+from fastapi import Depends, FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from travel_revenue_ai.api.v1 import (
@@ -16,6 +16,8 @@ from travel_revenue_ai.api.v1 import (
 from travel_revenue_ai.config import settings
 from travel_revenue_ai.health import is_ready, readiness_checks
 from travel_revenue_ai.observability.runtime import install_observability
+from travel_revenue_ai.security.clerk_auth import get_current_principal
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -43,11 +45,33 @@ app = FastAPI(
 )
 
 # Регистрация API routers
-app.include_router(signals_router, prefix="/api/v1")
-app.include_router(morning_brief_router, prefix="/api/v1")
-app.include_router(morning_brief_history_router, prefix="/api/v1")
-app.include_router(decision_cards_router, prefix="/api/v1")
-app.include_router(sources_router, prefix="/api/v1")
+_api_v1_auth_dependencies = [Depends(get_current_principal)]
+
+app.include_router(
+    signals_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
+app.include_router(
+    morning_brief_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
+app.include_router(
+    morning_brief_history_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
+app.include_router(
+    decision_cards_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
+app.include_router(
+    sources_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
 
 
 # Настройка CORS

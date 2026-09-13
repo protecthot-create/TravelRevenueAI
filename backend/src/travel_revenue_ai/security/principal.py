@@ -1,6 +1,7 @@
 """Минимальный immutable principal для подтверждённой Clerk-сессии."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -9,4 +10,4 @@ class Principal:
 
     subject_id: str
     issuer: str
-    token_type: str
+    token_type: Literal["session_token"] = "session_token"

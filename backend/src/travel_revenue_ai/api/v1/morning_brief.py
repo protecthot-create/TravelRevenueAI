@@ -16,6 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_path_tenant_context,
+    get_tenant_context,
+    require_payload_tenant,
+)
 from travel_revenue_ai.composition import (
     build_morning_brief_read_service,
     build_persisted_morning_brief_service,
@@ -39,6 +45,7 @@ from travel_revenue_ai.schemas.persisted_morning_brief import (
     PersistedMorningBriefResult,
 )
 from travel_revenue_ai.schemas.signal import SignalCreate
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.decision_card_feedback_service import (
     DecisionCardFeedbackNotFoundError,
     DecisionCardFeedbackService,
@@ -102,7 +109,7 @@ class PersistedMorningBriefResponseDTO(BaseModel):
     replayed: bool
 
 
-def _to_domain_signal(data: SignalCreate) -> Signal:
+def _to_domain_signal(data: SignalCreate, *, agency_id: UUID | None = None) -> Signal:
     """Преобразует входную API-схему в временный доменный Signal.
 
     Сигнал не сохраняется в базе данных: endpoint генерирует бриф
@@ -110,7 +117,7 @@ def _to_domain_signal(data: SignalCreate) -> Signal:
     """
     return Signal(
         signal_id=uuid.uuid4(),
-        agency_id=data.agency_id,
+        agency_id=agency_id or data.agency_id,
         source_id=data.source_id,
         signal_type=data.signal_type,
         raw_data=data.raw_data,
@@ -294,11 +301,16 @@ def _raise_morning_brief_read_http_error(error: Exception) -> None:
         "PipelineService и возвращает готовый MorningBriefResult."
     ),
 )
-def generate_morning_brief(signals: list[SignalCreate]) -> dict[str, Any]:
+def generate_morning_brief(
+    signals: list[SignalCreate],
+    tenant_context: TenantContext = Depends(get_tenant_context),
+) -> dict[str, Any]:
     """Генерирует утренний бриф из переданных сигналов."""
+    for signal in signals:
+        require_payload_tenant(tenant_context, signal.agency_id)
     pipeline_service = build_pipeline_service()
     result = pipeline_service.generate_morning_brief(
-        [_to_domain_signal(signal) for signal in signals]
+        [_to_domain_signal(signal, agency_id=tenant_context.agency_id) for signal in signals]
     )
     return result.to_display_dict()
 
@@ -312,8 +324,10 @@ def generate_morning_brief(signals: list[SignalCreate]) -> dict[str, Any]:
 def create_persisted_morning_brief(
     payload: PersistedMorningBriefCreateDTO,
     db: Session = Depends(get_db),
+    tenant_context: TenantContext = Depends(get_tenant_context),
 ) -> PersistedMorningBriefResponseDTO:
     """Вызывает persisted use case без копирования бизнес-логики."""
+    require_payload_tenant(tenant_context, payload.agency_id)
     service = build_persisted_morning_brief_service(db)
     try:
         result = service.generate(_to_persisted_request(payload))
@@ -333,8 +347,10 @@ def get_persisted_morning_brief(
     brief_id: UUID,
     agency_id: UUID = Query(description="Идентификатор агентства-владельца"),
     db: Session = Depends(get_db),
+    tenant_context: TenantContext = Depends(get_direct_tenant_context),
 ) -> MorningBriefReadDTO:
     """Возвращает persisted бриф только владельцу, не изменяя состояние базы."""
+    require_payload_tenant(tenant_context, agency_id)
     service = build_morning_brief_read_service(db)
     try:
         result = service.get_brief(brief_id=brief_id, agency_id=agency_id)
@@ -352,6 +368,7 @@ def get_persisted_morning_brief(
 )
 def list_persisted_morning_brief_history(
     agency_id: UUID,
+    tenant_context: TenantContext = Depends(get_path_tenant_context),
     limit: int = Query(
         default=20,
         ge=1,
@@ -386,8 +403,10 @@ def save_decision_card_feedback(
     payload: DecisionCardFeedbackRequest,
     agency_id: UUID = Query(description="Идентификатор агентства-владельца"),
     db: Session = Depends(get_db),
+    tenant_context: TenantContext = Depends(get_direct_tenant_context),
 ) -> DecisionCardFeedbackResponse:
     """Сохраняет MVP feedback, изменяя только существующие lifecycle-поля."""
+    require_payload_tenant(tenant_context, agency_id)
     service = DecisionCardFeedbackService(db)
     try:
         result = service.apply_feedback(

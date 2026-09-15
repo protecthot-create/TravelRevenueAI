@@ -2,26 +2,33 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import os
 import uuid
+from collections.abc import Iterator
+from copy import deepcopy
 from decimal import Decimal
-from typing import Iterator
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_path_tenant_context,
+    get_tenant_context,
+)
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
-from travel_revenue_ai.security.clerk_auth import get_current_principal
-from travel_revenue_ai.security.principal import Principal
 from travel_revenue_ai.models.agency import Agency
 from travel_revenue_ai.models.decision_card import DecisionCard
 from travel_revenue_ai.models.morning_brief import MorningBrief
 from travel_revenue_ai.models.signal import Signal
+from travel_revenue_ai.security.clerk_auth import get_current_principal
+from travel_revenue_ai.security.principal import Principal
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.persisted_morning_brief_errors import (
     InvalidPersistedMorningBriefRequest,
     PipelineExecutionError,
@@ -60,7 +67,19 @@ def db_session(postgres_engine: Engine) -> Iterator[Session]:
 
 
 @pytest.fixture()
-def client(db_session: Session) -> Iterator[TestClient]:
+def preview_agency(db_session: Session) -> Iterator[Agency]:
+    """Создаёт реально сохранённое агентство для tenant-контекста preview route."""
+    agency = Agency()
+    db_session.add(agency)
+    db_session.flush()
+    try:
+        yield agency
+    finally:
+        _cleanup_agency(db_session, agency.agency_id)
+
+
+@pytest.fixture()
+def client(db_session: Session, preview_agency: Agency) -> Iterator[TestClient]:
     """Переопределяет API DB dependency реальной PostgreSQL-сессией."""
 
     def override_get_db() -> Iterator[Session]:
@@ -69,8 +88,35 @@ def client(db_session: Session) -> Iterator[TestClient]:
     def override_get_current_principal() -> Principal:
         return Principal(subject_id="test-user", issuer="https://clerk.example.test")
 
+    async def override_tenant_context(request: Request) -> TenantContext:
+        agency_id = request.path_params.get("agency_id") or request.query_params.get("agency_id")
+        if agency_id is None:
+            try:
+                request_body = await request.json()
+            except ValueError:
+                request_body = None
+            if isinstance(request_body, dict):
+                agency_id = request_body.get("agency_id")
+        if (
+            agency_id is None
+            and request.method == "POST"
+            and request.url.path == "/api/v1/morning-brief/generate"
+            and isinstance(request_body, list)
+        ):
+            agency_id = preview_agency.agency_id
+        if agency_id is None:
+            raise AssertionError("Тестовый запрос должен явно передавать agency_id")
+        return TenantContext(
+            app_user_id=uuid.uuid4(),
+            agency_id=uuid.UUID(str(agency_id)),
+            role="member",
+        )
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_principal] = override_get_current_principal
+    app.dependency_overrides[get_tenant_context] = override_tenant_context
+    app.dependency_overrides[get_direct_tenant_context] = override_tenant_context
+    app.dependency_overrides[get_path_tenant_context] = override_tenant_context
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -424,8 +470,29 @@ def test_persisted_endpoint_maps_ownership_idempotency_and_date_conflicts(
     other_agency, other_signals = _create_agency_and_signals(db_session)
     try:
         ownership_payload = _payload(agency, [other_signals[0]])
+        before_brief_count = db_session.scalar(
+            select(func.count()).select_from(MorningBrief).where(
+                MorningBrief.agency_id == agency.agency_id
+            )
+        )
+        before_card_count = db_session.scalar(
+            select(func.count()).select_from(DecisionCard).where(
+                DecisionCard.agency_id == agency.agency_id
+            )
+        )
         ownership = client.post("/api/v1/morning-brief/persisted", json=ownership_payload)
         assert ownership.status_code == 409
+        assert ownership.json()["detail"] == "persisted_brief_conflict"
+        assert db_session.scalar(
+            select(func.count()).select_from(MorningBrief).where(
+                MorningBrief.agency_id == agency.agency_id
+            )
+        ) == before_brief_count
+        assert db_session.scalar(
+            select(func.count()).select_from(DecisionCard).where(
+                DecisionCard.agency_id == agency.agency_id
+            )
+        ) == before_card_count
 
         payload = _payload(agency, signals)
         created = client.post("/api/v1/morning-brief/persisted", json=payload)

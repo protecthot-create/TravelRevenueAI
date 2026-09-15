@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.testclient import TestClient
 
 from travel_revenue_ai.api.v1 import morning_brief
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_path_tenant_context,
+)
 from travel_revenue_ai.composition import build_morning_brief_read_service
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.models.decision_card import DecisionCard
 from travel_revenue_ai.models.morning_brief import MorningBrief, MorningBriefStatusEnum
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.morning_brief_read_errors import (
     MorningBriefReadIntegrityError,
     MorningBriefReadNotFoundError,
@@ -37,9 +43,29 @@ def client() -> Iterator[TestClient]:
     def override_get_db() -> Iterator[object]:
         yield object()
 
+    def override_direct_tenant_context(agency_id: UUID = Query(...)) -> TenantContext:
+        return TenantContext(
+            app_user_id=uuid.uuid4(),
+            agency_id=agency_id,
+            role="member",
+        )
+
+    def override_path_tenant_context(agency_id: UUID) -> TenantContext:
+        return TenantContext(
+            app_user_id=uuid.uuid4(),
+            agency_id=agency_id,
+            role="member",
+        )
+
     test_app.dependency_overrides[get_db] = override_get_db
-    with TestClient(test_app, raise_server_exceptions=False) as test_client:
-        yield test_client
+    test_app.dependency_overrides[get_direct_tenant_context] = override_direct_tenant_context
+    test_app.dependency_overrides[get_path_tenant_context] = override_path_tenant_context
+    test_app.dependency_overrides[morning_brief.get_tenant_context] = override_direct_tenant_context
+    try:
+        with TestClient(test_app, raise_server_exceptions=True) as test_client:
+            yield test_client
+    finally:
+        test_app.dependency_overrides.clear()
 
 
 def _card(*, agency_id: uuid.UUID, label: str, card_type: str) -> DecisionCard:
@@ -82,7 +108,7 @@ def _brief(
         brief_id=uuid.uuid4(),
         agency_id=agency_id,
         date=brief_date,
-        generated_at=datetime(2026, 8, 19, 8, 0, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 8, 19, 8, 0, tzinfo=UTC),
         status=MorningBriefStatusEnum.draft,
         main_decision_card_id=main_decision_card_id,
         top_opportunity_card_ids=[str(card_id) for card_id in opportunity_card_ids or []],

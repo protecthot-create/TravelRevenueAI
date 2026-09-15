@@ -6,18 +6,12 @@ PipelineService не знает о конкретных RuleBased-компоне
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from travel_revenue_ai.config import Settings, settings
-from travel_revenue_ai.security.secrets import SecretService
-from travel_revenue_ai.services.data_source_service import DataSourceService
-from travel_revenue_ai.services.identity_resolution_service import IdentityResolutionService
-from travel_revenue_ai.services.signal_service import SignalService
-from travel_revenue_ai.services.source_collection_service import SourceCollectionService
-from travel_revenue_ai.sources.default_providers import register_default_providers
-from travel_revenue_ai.sources.manager import SourceManager
-from travel_revenue_ai.sources.provider_registry import ProviderRegistry
-from travel_revenue_ai.sources.runtime_factory import DataSourceRuntimeFactory
+from travel_revenue_ai.repositories.membership_repository import MembershipRepository
 from travel_revenue_ai.revenue_intelligence.engine import RevenueIntelligenceEngine
 from travel_revenue_ai.revenue_intelligence.opportunity_detector import (
     RuleBasedOpportunityDetector,
@@ -31,11 +25,21 @@ from travel_revenue_ai.revenue_intelligence.recommendation_builder import (
 from travel_revenue_ai.revenue_intelligence.revenue_estimator import (
     RuleBasedRevenueEstimator,
 )
+from travel_revenue_ai.security.secrets import SecretService
+from travel_revenue_ai.services.data_source_service import DataSourceService
+from travel_revenue_ai.services.identity_resolution_service import IdentityResolutionService
 from travel_revenue_ai.services.morning_brief_read_service import MorningBriefReadService
 from travel_revenue_ai.services.persisted_morning_brief_service import (
     PersistedMorningBriefService,
 )
 from travel_revenue_ai.services.pipeline_service import PipelineService
+from travel_revenue_ai.services.signal_service import SignalService
+from travel_revenue_ai.services.source_collection_service import SourceCollectionService
+from travel_revenue_ai.services.tenant_authorization_service import TenantAuthorizationService
+from travel_revenue_ai.sources.default_providers import register_default_providers
+from travel_revenue_ai.sources.manager import SourceManager
+from travel_revenue_ai.sources.provider_registry import ProviderRegistry
+from travel_revenue_ai.sources.runtime_factory import DataSourceRuntimeFactory
 
 
 def build_revenue_intelligence_engine(
@@ -65,8 +69,9 @@ def build_pipeline_service(
 def build_source_collection_service(
     session: Session,
     app_settings: Settings = settings,
+    agency_id: UUID | None = None,
 ) -> SourceCollectionService:
-    """Собирает runtime-источники и orchestration-сервис одного ручного запуска."""
+    """Собирает runtime-источники и orchestration-сервис одного запуска."""
     provider_registry = ProviderRegistry()
     register_default_providers(provider_registry)
 
@@ -86,7 +91,7 @@ def build_source_collection_service(
     )
     runtime_factory.register_enabled_sources(
         source_manager=source_manager,
-        data_sources=data_source_service.list_sources(),
+        data_sources=data_source_service.list_sources(agency_id=agency_id),
     )
 
     return SourceCollectionService(
@@ -112,6 +117,16 @@ def build_identity_resolution_service(
 ) -> IdentityResolutionService:
     """Собирает read-only resolver identity для одного запроса."""
     return IdentityResolutionService(session=session)
+
+
+def build_tenant_authorization_service(
+    session: Session,
+) -> TenantAuthorizationService:
+    """Собирает read-only tenant authorization для одного запроса."""
+    return TenantAuthorizationService(
+        identity_service=build_identity_resolution_service(session),
+        membership_repository=MembershipRepository(session),
+    )
 
 
 def build_persisted_morning_brief_service(

@@ -17,9 +17,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_tenant_context,
+    require_payload_tenant,
+    require_resource_tenant,
+)
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.models.signal import SignalStatusEnum, SignalTypeEnum
 from travel_revenue_ai.schemas.signal import SignalCreate, SignalResponse
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.signal_service import SignalService
 
 router = APIRouter(
@@ -68,6 +75,7 @@ def _signal_to_response(signal: object) -> SignalResponse:
 def create_signal(
     data: SignalCreate,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
 ) -> SignalResponse:
     """Создаёт новый сигнал в системе.
 
@@ -81,9 +89,10 @@ def create_signal(
     Raises:
         HTTPException 422: Если входные данные не прошли валидацию.
     """
+    require_payload_tenant(tenant_context, data.agency_id)
     service = SignalService(db)
     signal = service.create_signal(
-        agency_id=data.agency_id,
+        agency_id=tenant_context.agency_id,
         source_id=data.source_id,
         signal_type=data.signal_type,
         raw_data=data.raw_data,
@@ -105,6 +114,7 @@ def create_signal(
 def get_signal(
     signal_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> SignalResponse:
     """Возвращает сигнал по UUID.
 
@@ -127,6 +137,7 @@ def get_signal(
             detail=f"Сигнал с id={signal_id} не найден",
         )
 
+    require_resource_tenant(tenant_context, signal.agency_id)
     return _signal_to_response(signal)
 
 
@@ -144,6 +155,7 @@ def get_signal(
 )
 def list_signals(
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
     agency_id: uuid.UUID | None = Query(
         None,
         description="Фильтр по идентификатору агентства",
@@ -181,9 +193,11 @@ def list_signals(
     Returns:
         Список сигналов, соответствующих фильтрам.
     """
+    if agency_id is not None:
+        require_payload_tenant(tenant_context, agency_id)
     service = SignalService(db)
     signals = service.list_signals(
-        agency_id=agency_id,
+        agency_id=tenant_context.agency_id,
         signal_type=signal_type,
         status=status,
         skip=skip,
@@ -205,6 +219,7 @@ def list_signals(
 def delete_signal(
     signal_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> None:
     """Удаляет сигнал по UUID.
 
@@ -224,4 +239,5 @@ def delete_signal(
             detail=f"Сигнал с id={signal_id} не найден",
         )
 
+    require_resource_tenant(tenant_context, signal.agency_id)
     service.delete_signal(signal)

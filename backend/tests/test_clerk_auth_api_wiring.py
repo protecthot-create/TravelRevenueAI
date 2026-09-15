@@ -4,17 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from clerk_backend_api.security import AuthStatus, RequestState
 from fastapi.testclient import TestClient
 
+from travel_revenue_ai.api.v1.tenant_dependencies import get_tenant_context
 from travel_revenue_ai.config import Settings
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
 from travel_revenue_ai.security import clerk_auth
 from travel_revenue_ai.security.clerk_auth import get_current_principal
-
+from travel_revenue_ai.security.tenant_context import TenantContext
 
 ISSUER = "https://clerk.example.test"
 VERIFICATION_KEY = "test-verification-key"
@@ -131,7 +133,11 @@ def test_valid_mocked_clerk_session_reaches_route_logic(
     def override_get_db() -> Iterator[object]:
         yield object()
 
+    def override_tenant_context() -> TenantContext:
+        return TenantContext(app_user_id=uuid4(), agency_id=uuid4(), role="member")
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_tenant_context] = override_tenant_context
     try:
         response = api_client.get(
             "/api/v1/signals",
@@ -139,6 +145,7 @@ def test_valid_mocked_clerk_session_reaches_route_logic(
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_tenant_context, None)
 
     assert response.status_code == 200
     assert response.json() == []

@@ -1,15 +1,19 @@
 """API управления конфигурациями и состоянием источников данных."""
 
-from datetime import date
 import uuid
+from datetime import date
 from typing import Annotated
-
-from travel_revenue_ai.composition import build_source_collection_service
-from travel_revenue_ai.schemas.persisted_morning_brief import BriefTriggerType
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_tenant_context,
+    require_payload_tenant,
+    require_resource_tenant,
+)
+from travel_revenue_ai.composition import build_source_collection_service
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.schemas.data_source import (
     DataSourceCreate,
@@ -18,6 +22,8 @@ from travel_revenue_ai.schemas.data_source import (
     SourceConnectionTestResponse,
     SourceHealthResponse,
 )
+from travel_revenue_ai.schemas.persisted_morning_brief import BriefTriggerType
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.data_source_service import DataSourceService
 from travel_revenue_ai.services.source_health_service import SourceHealthService
 
@@ -50,12 +56,15 @@ def _get_required_source(
 )
 def list_source_health(
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
     agency_id: uuid.UUID | None = Query(default=None),
 ) -> list[SourceHealthResponse]:
     """Возвращает безопасное health-состояние всех доступных источников."""
+    if agency_id is not None:
+        require_payload_tenant(tenant_context, agency_id)
     source_service = DataSourceService(db)
     health_service = SourceHealthService()
-    sources = source_service.list_sources(agency_id=agency_id)
+    sources = source_service.list_sources(agency_id=tenant_context.agency_id)
     return [
         SourceHealthResponse(
             source=_to_response(source),
@@ -71,10 +80,13 @@ def list_source_health(
 @router.get("", response_model=list[DataSourceResponse], summary="Список источников")
 def list_sources(
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
     agency_id: uuid.UUID | None = Query(default=None),
 ) -> list[DataSourceResponse]:
     """Возвращает список источников без паролей, tokens и IMAP credentials."""
-    sources = DataSourceService(db).list_sources(agency_id=agency_id)
+    if agency_id is not None:
+        require_payload_tenant(tenant_context, agency_id)
+    sources = DataSourceService(db).list_sources(agency_id=tenant_context.agency_id)
     return [_to_response(source) for source in sources]
 
 
@@ -87,9 +99,15 @@ def list_sources(
 def create_source(
     data: DataSourceCreate,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
 ) -> DataSourceResponse:
     """Сохраняет конфигурацию источника; секреты не попадают в ответ."""
-    return _to_response(DataSourceService(db).create_source(data))
+    require_payload_tenant(tenant_context, data.agency_id)
+    return _to_response(
+        DataSourceService(db).create_source(
+            data.model_copy(update={"agency_id": tenant_context.agency_id})
+        )
+    )
 
 
 @router.post(
@@ -98,11 +116,15 @@ def create_source(
 )
 def collect_sources(
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_tenant_context)],
     brief_date: date | None = Query(default=None),
     run_id: str | None = Query(default=None, max_length=128),
 ) -> dict[str, object]:
     """Собирает enabled-источники и возвращает только безопасную сводку запуска."""
-    result = build_source_collection_service(db).collect_and_generate_morning_brief(
+    result = build_source_collection_service(
+        db,
+        agency_id=tenant_context.agency_id,
+    ).collect_and_generate_morning_brief(
         brief_date=brief_date,
         trigger_type=BriefTriggerType.manual,
         run_id=run_id,
@@ -125,10 +147,13 @@ def collect_sources(
 def get_source(
     source_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> DataSourceResponse:
     """Возвращает публичную конфигурацию одного источника."""
     service = DataSourceService(db)
-    return _to_response(_get_required_source(service, source_id))
+    source = _get_required_source(service, source_id)
+    require_resource_tenant(tenant_context, source.agency_id)
+    return _to_response(source)
 
 
 @router.put(
@@ -140,10 +165,12 @@ def update_source(
     source_id: uuid.UUID,
     data: DataSourceUpdate,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> DataSourceResponse:
     """Обновляет разрешённые поля источника."""
     service = DataSourceService(db)
     source = _get_required_source(service, source_id)
+    require_resource_tenant(tenant_context, source.agency_id)
     return _to_response(service.update_source(source, data))
 
 
@@ -155,10 +182,13 @@ def update_source(
 def delete_source(
     source_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> None:
     """Удаляет источник данных."""
     service = DataSourceService(db)
-    service.delete_source(_get_required_source(service, source_id))
+    source = _get_required_source(service, source_id)
+    require_resource_tenant(tenant_context, source.agency_id)
+    service.delete_source(source)
 
 
 @router.post(
@@ -169,10 +199,13 @@ def delete_source(
 def test_source_connection(
     source_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
+    tenant_context: Annotated[TenantContext, Depends(get_direct_tenant_context)],
 ) -> SourceConnectionTestResponse:
     """Проверяет IMAP/mock подключение и сохраняет только безопасный результат."""
     service = DataSourceService(db)
-    source = service.test_connection(_get_required_source(service, source_id))
+    source = _get_required_source(service, source_id)
+    require_resource_tenant(tenant_context, source.agency_id)
+    source = service.test_connection(source)
     return SourceConnectionTestResponse(
         source=_to_response(source),
         status=source.sync_status,

@@ -2,16 +2,21 @@
 
 from datetime import date
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from travel_revenue_ai.api.v1 import sources
+from travel_revenue_ai.api.v1.tenant_dependencies import get_tenant_context
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
+from travel_revenue_ai.models.data_source import DataSourceTypeEnum, SyncStatusEnum
 from travel_revenue_ai.security.clerk_auth import get_current_principal
 from travel_revenue_ai.security.principal import Principal
-from travel_revenue_ai.models.data_source import DataSourceTypeEnum, SyncStatusEnum
 from travel_revenue_ai.security.secrets import SecretService
+from travel_revenue_ai.security.tenant_context import TenantContext
 from travel_revenue_ai.services.source_health_service import (
     SourceHealthService,
     SourceHealthStatusEnum,
@@ -156,10 +161,10 @@ def test_collect_sources_endpoint_returns_safe_runtime_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Manual endpoint передаёт параметры в composition root и не раскрывает internals."""
-    from travel_revenue_ai.api.v1 import sources
 
     agency_id = "00000000-0000-0000-0000-000000000001"
     captured: dict[str, object] = {}
+    captured_composition_kwargs: dict[str, object] = {}
 
     class FakeCollectionService:
         def collect_and_generate_morning_brief(self, **kwargs: object) -> object:
@@ -174,7 +179,9 @@ def test_collect_sources_endpoint_returns_safe_runtime_summary(
     monkeypatch.setattr(
         sources,
         "build_source_collection_service",
-        lambda session: FakeCollectionService(),
+        lambda session, **kwargs: (
+            captured_composition_kwargs.update(kwargs) or FakeCollectionService()
+        ),
     )
 
     def override_get_db() -> object:
@@ -183,10 +190,21 @@ def test_collect_sources_endpoint_returns_safe_runtime_summary(
     def override_get_current_principal() -> Principal:
         return Principal(subject_id="test-user", issuer="https://clerk.example.test")
 
+    def override_tenant_context() -> TenantContext:
+        return TenantContext(
+            app_user_id=UUID("00000000-0000-0000-0000-000000000099"),
+            agency_id=UUID(agency_id),
+            role="member",
+        )
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_principal] = override_get_current_principal
+    app.dependency_overrides[get_tenant_context] = override_tenant_context
     try:
-        with TestClient(app) as client:
+        test_app = FastAPI()
+        test_app.include_router(sources.router, prefix="/api/v1")
+        test_app.dependency_overrides.update(app.dependency_overrides)
+        with TestClient(test_app) as client:
             response = client.post(
                 "/api/v1/sources/collect?brief_date=2026-08-01&run_id=cs6-manual-test"
             )
@@ -200,6 +218,7 @@ def test_collect_sources_endpoint_returns_safe_runtime_summary(
         "errors_count": 1,
         "persisted_brief_agency_ids": [agency_id],
     }
+    assert captured_composition_kwargs == {"agency_id": UUID(agency_id)}
     assert captured == {
         "brief_date": date(2026, 8, 1),
         "trigger_type": "manual",

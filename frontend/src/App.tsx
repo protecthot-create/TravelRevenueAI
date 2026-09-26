@@ -36,13 +36,17 @@ import {
 import {
   navigationItems,
   type DashboardData,
+  type DecisionCardItem,
   type NavigationPage,
   type SignalItem,
 } from "./data/dashboard";
 import {
-  generateMorningBriefDashboardData,
+  createPersistedMorningBriefDashboardData,
   getDashboardData,
+  submitDecisionCardFeedback,
+  type DecisionCardFeedbackValue,
 } from "./services/dashboard-api";
+import { ApiClientError } from "./services/api-client";
 
 const navigationIcons: Record<NavigationPage, LucideIcon> = {
   dashboard: LayoutDashboard,
@@ -837,7 +841,46 @@ function SignalsPage({ data }: { data: DashboardData }) {
   );
 }
 
-function DecisionCardsPage({ data }: { data: DashboardData }) {
+const FEEDBACK_STATE_LABELS: Record<string, string> = {
+  pending: "Новая",
+  accepted: "В работе",
+  dismissed: "Отклонена",
+  completed: "Выполнена",
+};
+
+function describeFeedbackError(error: unknown): string {
+  if (error instanceof ApiClientError) {
+    if (error.status === 401) {
+      return "Требуется повторный вход.";
+    }
+    if (error.status === 403) {
+      return "Нет доступа к карточкам этого рабочего пространства.";
+    }
+    if (error.status === 404) {
+      return "Карточка не найдена в backend. Обновите данные и повторите.";
+    }
+    if (error.status === 409) {
+      return "Состояние карточки изменилось. Обновите данные и повторите.";
+    }
+    if (error.status === 0 || error.status === 503) {
+      return "Сервис временно недоступен. Повторите попытку позже.";
+    }
+  }
+
+  return error instanceof Error && error.message
+    ? error.message
+    : "Повторите попытку позже.";
+}
+
+function DecisionCardsPage({
+  data,
+  onFeedback,
+  pendingCardId,
+}: {
+  data: DashboardData;
+  onFeedback: (card: DecisionCardItem, feedbackState: DecisionCardFeedbackValue) => void;
+  pendingCardId: string | null;
+}) {
   return (
     <>
       <PageIntro eyebrow="Action layer" title="Карточки решений">
@@ -845,26 +888,75 @@ function DecisionCardsPage({ data }: { data: DashboardData }) {
       </PageIntro>
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
         {data.decisionCards.map((card) => (
-          <article key={card.id} className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-card">
-            <div className="flex items-start justify-between gap-3">
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{card.category}</span>
-              <span className={classNames("text-sm font-bold", card.impact.startsWith("-") ? "text-rose-600" : "text-emerald-600")}>{card.impact}</span>
-            </div>
-            <h2 className="mt-4 text-lg font-semibold tracking-tight text-slate-950">{card.title}</h2>
-            <p className="mt-2 text-sm leading-6 text-slate-500">{card.summary}</p>
-            <dl className="mt-5 grid grid-cols-3 gap-2 border-y border-slate-100 py-4 text-center">
-              <div><dt className="text-[11px] text-slate-400">Уверенность</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{card.confidence}</dd></div>
-              <div><dt className="text-[11px] text-slate-400">Горизонт</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{card.horizon}</dd></div>
-              <div><dt className="text-[11px] text-slate-400">Владелец</dt><dd className="mt-1 truncate text-sm font-semibold text-slate-800">{card.owner}</dd></div>
-            </dl>
-            <ol className="mt-5 space-y-3">
-              {card.steps.map((step, index) => <li key={step} className="flex gap-3 text-sm leading-5 text-slate-600"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-emerald-50 text-xs font-bold text-emerald-700">{index + 1}</span>{step}</li>)}
-            </ol>
-            <button className="mt-6 min-h-11 rounded-xl bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">Взять в работу</button>
-          </article>
+          <DecisionCard
+            key={card.id}
+            card={card}
+            onFeedback={onFeedback}
+            isPending={card.decisionCardId === pendingCardId}
+          />
         ))}
       </div>
     </>
+  );
+}
+function DecisionCard({
+  card,
+  onFeedback,
+  isPending,
+}: {
+  card: DecisionCardItem;
+  onFeedback: (card: DecisionCardItem, feedbackState: DecisionCardFeedbackValue) => void;
+  isPending: boolean;
+}) {
+  const feedbackLabel = card.feedbackState ? FEEDBACK_STATE_LABELS[card.feedbackState] : null;
+
+  return (
+    <article className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{card.category}</span>
+        <span className={classNames("text-sm font-bold", card.impact.startsWith("-") ? "text-rose-600" : "text-emerald-600")}>{card.impact}</span>
+      </div>
+      <h2 className="mt-4 text-lg font-semibold tracking-tight text-slate-950">{card.title}</h2>
+      <p className="mt-2 text-sm leading-6 text-slate-500">{card.summary}</p>
+      <dl className="mt-5 grid grid-cols-3 gap-2 border-y border-slate-100 py-4 text-center">
+        <div><dt className="text-[11px] text-slate-400">Уверенность</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{card.confidence}</dd></div>
+        <div><dt className="text-[11px] text-slate-400">Горизонт</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{card.horizon}</dd></div>
+        <div><dt className="text-[11px] text-slate-400">Приоритет</dt><dd className="mt-1 truncate text-sm font-semibold text-slate-800">{card.owner}</dd></div>
+      </dl>
+      <ol className="mt-5 space-y-3">
+        {card.steps.map((step, index) => <li key={step} className="flex gap-3 text-sm leading-5 text-slate-600"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-emerald-50 text-xs font-bold text-emerald-700">{index + 1}</span>{step}</li>)}
+      </ol>
+      {card.decisionCardId ? (
+        <div className="mt-6 border-t border-slate-100 pt-4">
+          {feedbackLabel ? (
+            <p className="mb-3 text-xs font-semibold text-slate-500">Статус: {feedbackLabel}</p>
+          ) : null}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              className="min-h-11 rounded-xl bg-slate-950 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
+              disabled={isPending}
+              onClick={() => onFeedback(card, "accepted")}
+            >
+              Взять в работу
+            </button>
+            <button
+              className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-wait disabled:opacity-60"
+              disabled={isPending}
+              onClick={() => onFeedback(card, "completed")}
+            >
+              Выполнено
+            </button>
+            <button
+              className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-wait disabled:opacity-60"
+              disabled={isPending}
+              onClick={() => onFeedback(card, "dismissed")}
+            >
+              Отклонить
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -914,7 +1006,7 @@ function SettingsPage({ data }: { data: DashboardData }) {
   return (
     <>
       <PageIntro eyebrow="Configuration" title="Настройки">
-        Интерфейс подключён к FastAPI. Базовый URL API задаётся переменной окружения VITE_API_URL.
+        Интерфейс подключён к FastAPI. Базовый URL API задаётся переменной окружения VITE_API_BASE_URL.
       </PageIntro>
       <div className="space-y-5">
         {data.settings.map((section) => <section key={section.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card sm:p-6"><h2 className="text-lg font-semibold text-slate-950">{section.title}</h2><p className="mt-1 text-sm text-slate-500">{section.description}</p><div className="mt-5 divide-y divide-slate-100">{section.items.map((item) => <div key={item.id} className="flex flex-col gap-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-8"><div><h3 className="text-sm font-semibold text-slate-800">{item.label}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{item.hint}</p></div><code className="w-fit rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700">{item.value}</code></div>)}</div></section>)}
@@ -923,7 +1015,7 @@ function SettingsPage({ data }: { data: DashboardData }) {
   );
 }
 
-function App() {
+function App({ agencyId }: { agencyId: string }) {
   const [activePage, setActivePage] = useState<NavigationPage>("dashboard");
   const [data, setData] = useState<DashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -942,11 +1034,52 @@ function App() {
     window.setTimeout(() => dismissToast(id), 6000);
   };
 
+  const [feedbackPendingId, setFeedbackPendingId] = useState<string | null>(null);
+
+  const handleDecisionCardFeedback = async (
+    card: DecisionCardItem,
+    feedbackState: DecisionCardFeedbackValue,
+  ) => {
+    if (!card.decisionCardId) {
+      return;
+    }
+
+    setFeedbackPendingId(card.decisionCardId);
+    try {
+      const response = await submitDecisionCardFeedback(agencyId, card.decisionCardId, feedbackState);
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              decisionCards: current.decisionCards.map((item) =>
+                item.decisionCardId === response.decision_card_id
+                  ? { ...item, feedbackState: response.feedback_state, status: response.status }
+                  : item,
+              ),
+            }
+          : current,
+      );
+      showToast({
+        kind: "success",
+        title: "Статус карточки обновлён",
+        description: `Новое состояние: ${FEEDBACK_STATE_LABELS[response.feedback_state] ?? response.feedback_state}.`,
+      });
+    } catch (error) {
+      showToast({
+        kind: "error",
+        title: "Не удалось сохранить статус карточки",
+        description: describeFeedbackError(error),
+      });
+    } finally {
+      setFeedbackPendingId(null);
+    }
+  };
+
   const refreshData = async () => {
     setIsLoading(true);
     setLoadError(null);
     try {
-      setData(await getDashboardData());
+      setData(await getDashboardData(agencyId));
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Не удалось загрузить данные.");
     } finally {
@@ -961,7 +1094,7 @@ function App() {
   const refreshWidget = async (widget: WidgetName) => {
     setRefreshingWidget(widget);
     try {
-      setData(await getDashboardData());
+      setData(await getDashboardData(agencyId));
     } catch (error) {
       showToast({ kind: "error", title: "Не удалось обновить виджет", description: error instanceof Error ? error.message : "Повторите попытку позже." });
     } finally {
@@ -974,17 +1107,28 @@ function App() {
     setIsGeneratingBrief(true);
 
     try {
-      const dashboardData = await generateMorningBriefDashboardData();
-      setData(dashboardData);
-      setLastGeneratedAt(dashboardData.morningBrief.generatedAt);
+      const result = await createPersistedMorningBriefDashboardData(agencyId);
+      setData(result.data);
+      setLastGeneratedAt(result.data.morningBrief.generatedAt);
       setLastRun({
-        generatedAt: dashboardData.morningBrief.generatedAt,
+        generatedAt: result.data.morningBrief.generatedAt,
         status: "success",
         durationMs: performance.now() - startedAt,
-        signalCount: dashboardData.signals.length,
-        decisionCardCount: dashboardData.decisionCards.length,
+        signalCount: result.data.signals.length,
+        decisionCardCount: result.data.decisionCards.length,
       });
-      showToast({ kind: "success", title: "Morning Brief успешно сформирован" });
+      showToast(
+        result.shownExisting
+          ? {
+              kind: "success",
+              title: "Бриф на сегодня уже существует",
+              description: "Показан сохранённый вариант из backend.",
+            }
+          : {
+              kind: "success",
+              title: result.replayed ? "Morning Brief восстановлен из backend" : "Morning Brief сохранён в backend",
+            },
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Повторите попытку позже.";
       setLastRun({
@@ -1021,7 +1165,13 @@ function App() {
         />
       ),
       signals: <SignalsPage data={dashboardData} />,
-      "decision-cards": <DecisionCardsPage data={dashboardData} />,
+      "decision-cards": (
+        <DecisionCardsPage
+          data={dashboardData}
+          onFeedback={handleDecisionCardFeedback}
+          pendingCardId={feedbackPendingId}
+        />
+      ),
       "morning-brief": <MorningBriefPage data={dashboardData} />,
       sources: <SourcesPage data={dashboardData} />,
       settings: <SettingsPage data={dashboardData} />,

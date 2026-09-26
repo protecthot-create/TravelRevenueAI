@@ -29,6 +29,17 @@
 
 Backend принимает только `Authorization: Bearer <session_token>`. Cookie-only `__session` не используется.
 
+## Frontend (Vite)
+
+Переменные frontend внедряются на этапе сборки Vite (см. `frontend/Dockerfile` и build args в `docker-compose.yml`):
+
+| Переменная | Обязательна | Назначение |
+|---|---:|---|
+| `VITE_API_BASE_URL` | да | Базовый URL FastAPI API с префиксом версии: `http://localhost:8000/api/v1` в dev, `/api/v1` за nginx |
+| `VITE_CLERK_PUBLISHABLE_KEY` | да | Publishable key Clerk для UI-аутентификации |
+
+`VITE_CLERK_PUBLISHABLE_KEY` — публичное значение, но реальный ключ в репозиторий не коммитится: в `.env.example` остаётся placeholder, реальное значение задаётся в локальном `.env` или секретах окружения.
+
 ## Development
 
 Development использует SQLite без Docker PostgreSQL:

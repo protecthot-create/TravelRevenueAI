@@ -1,13 +1,15 @@
 import {
   type BriefActionItem,
   type DashboardData,
+  type DecisionCardFeedbackState,
   type DecisionCardItem,
   type KPIItem,
+  type MorningBriefData,
   type SignalItem,
   type SignalKind,
   type SignalSeverity,
 } from "../data/dashboard";
-import { apiClient } from "./api-client";
+import { ApiClientError, apiClient } from "./api-client";
 
 type SignalStatus =
   | "new"
@@ -31,46 +33,83 @@ interface SignalResponseDto {
   can_be_filtered: boolean;
 }
 
-interface SignalCreateDto {
+/** Разрешённые backend значения feedback (DecisionCardFeedbackState). */
+export type DecisionCardFeedbackValue = Exclude<
+  DecisionCardFeedbackState,
+  "pending"
+>;
+
+/** Тело команды POST /morning-brief/persisted (контракт PersistedMorningBriefCreateDTO). */
+export interface PersistedMorningBriefCreateCommand {
   agency_id: string;
-  source_id: string;
-  signal_type: SignalKind;
-  raw_data: Record<string, unknown>;
+  brief_date: string;
+  signal_ids: string[];
+  idempotency_key: string;
+  trigger_type: "manual";
 }
 
-interface DecisionCardDto {
-  card_type:
-    | "opportunity"
-    | "risk"
-    | "market_insight"
-    | "operational_insight";
+/** Ответ persisted-создания: только IDs, контент карточек читается отдельным GET. */
+export interface PersistedMorningBriefCreateResponseDto {
+  brief_id: string;
+  brief_date: string;
+  decision_card_groups: Array<{
+    category: "opportunities" | "risks" | "market_insights";
+    decision_card_ids: string[];
+  }>;
+  main_decision_card_id: string | null;
+  replayed: boolean;
+}
+
+/** Persisted DecisionCard (контракт MorningBriefDecisionCardDTO). */
+export interface PersistedDecisionCardDto {
+  decision_card_id: string;
+  card_type: string;
   title: string;
   summary: string;
-  money_effect_display: string;
-  importance_label: string;
   why_it_matters: string;
   what_to_do: string;
-  deadline_display: string;
-  confidence_display: string;
-  source_display: string;
-  status_display: string;
+  deadline: string;
+  money_effect_display: string;
+  score: number;
+  confidence: number;
+  priority: string;
+  status: string;
+  feedback_state: DecisionCardFeedbackState;
 }
 
-interface MorningBriefResponseDto {
+/** Полное persisted-представление брифа (контракт MorningBriefReadDTO). */
+export interface PersistedMorningBriefReadDto {
   brief_id: string;
-  date: string;
+  agency_id: string;
+  brief_date: string;
   generated_at: string;
-  opportunities: DecisionCardDto[];
-  risks: DecisionCardDto[];
-  market_insights: DecisionCardDto[];
-  main_action: DecisionCardDto | null;
+  status: string;
   summary_text: string;
-  stats: {
-    total_cards_processed: number;
-    opportunities_count: number;
-    risks_count: number;
-    market_insights_count: number;
-  };
+  opportunity_cards: PersistedDecisionCardDto[];
+  risk_cards: PersistedDecisionCardDto[];
+  market_insight_cards: PersistedDecisionCardDto[];
+  main_decision_card: PersistedDecisionCardDto | null;
+}
+
+/** Metadata-only запись истории брифов (контракт MorningBriefHistoryItemDTO). */
+export interface MorningBriefHistoryItemDto {
+  brief_id: string;
+  brief_date: string;
+  generated_at: string;
+  status: string;
+  summary_text: string;
+  opportunity_count: number;
+  risk_count: number;
+  market_insight_count: number;
+  total_card_count: number;
+}
+
+/** Ответ сохранения feedback (контракт DecisionCardFeedbackResponse). */
+export interface DecisionCardFeedbackResponseDto {
+  decision_card_id: string;
+  status: string;
+  feedback_state: DecisionCardFeedbackValue;
+  updated_at: string;
 }
 
 function getString(data: Record<string, unknown>, ...keys: string[]): string | null {
@@ -197,45 +236,52 @@ function toSignalItem(signal: SignalResponseDto): SignalItem {
   };
 }
 
-function toBriefAction(
-  card: DecisionCardDto,
-  id: string,
+function persistedCardToBriefAction(
+  card: PersistedDecisionCardDto,
   kind: "opportunity" | "risk",
 ): BriefActionItem {
   return {
-    id,
+    id: card.decision_card_id,
     title: card.title,
     effect: card.money_effect_display,
-    deadline: card.deadline_display,
+    deadline: card.deadline,
     kind,
     description: card.what_to_do || card.summary,
   };
 }
 
-function toDecisionCard(
-  card: DecisionCardDto,
-  id: string,
+const PRIORITY_LABELS: Record<string, string> = {
+  high: "Высокий",
+  medium: "Средний",
+  low: "Низкий",
+};
+
+function persistedCardToDecisionCard(
+  card: PersistedDecisionCardDto,
 ): DecisionCardItem {
-  const categoryByType = {
+  const categoryByType: Record<string, DecisionCardItem["category"]> = {
     opportunity: "growth",
     risk: "retention",
     market_insight: "pricing",
     operational_insight: "operations",
-  } as const;
+  };
 
   return {
-    id,
+    id: card.decision_card_id,
+    decisionCardId: card.decision_card_id,
     title: card.title,
-    category: categoryByType[card.card_type],
+    category: categoryByType[card.card_type] ?? "operations",
     impact: card.money_effect_display,
-    confidence: card.confidence_display,
-    horizon: card.deadline_display,
-    owner: card.status_display,
+    confidence: `${Math.round(card.confidence * 100)}%`,
+    horizon: card.deadline,
+    owner: PRIORITY_LABELS[card.priority] ?? card.priority,
     summary: card.summary,
     steps: card.what_to_do
       .split(/\n|\d+\.\s/)
       .map((step) => step.trim())
       .filter(Boolean),
+    feedbackState: card.feedback_state,
+    status: card.status,
   };
 }
 
@@ -262,7 +308,7 @@ function createEmptyMorningBrief() {
 
 function createKpis(
   signals: SignalResponseDto[],
-  brief: MorningBriefResponseDto | null,
+  brief: PersistedMorningBriefReadDto | null,
 ): KPIItem[] {
   const activeSignals = signals.filter((signal) => !signal.is_rejected);
   const riskSignals = activeSignals.filter((signal) => signal.signal_type === "risk");
@@ -277,7 +323,7 @@ function createKpis(
       label: "Возможности в pipeline",
       value: String(opportunitySignals.length),
       delta: brief
-        ? `${brief.stats.opportunities_count} в утреннем брифе`
+        ? `${brief.opportunity_cards.length} в утреннем брифе`
         : "Бриф ещё не сформирован",
       trend: "up",
       hint: "Количество сигналов типа opportunity из backend API",
@@ -286,7 +332,7 @@ function createKpis(
       id: "risk-exposure",
       label: "Риски в pipeline",
       value: String(riskSignals.length),
-      delta: brief ? `${brief.stats.risks_count} в утреннем брифе` : "Без оценки",
+      delta: brief ? `${brief.risk_cards.length} в утреннем брифе` : "Без оценки",
       trend: riskSignals.length > 0 ? "down" : "neutral",
       hint: "Количество сигналов типа risk из backend API",
     },
@@ -309,66 +355,45 @@ function createKpis(
   ];
 }
 
-async function requestMorningBrief(
-  signals: SignalResponseDto[],
-): Promise<MorningBriefResponseDto | null> {
-  if (signals.length === 0) {
-    return null;
-  }
-
-  const payload: SignalCreateDto[] = signals.map((signal) => ({
-    agency_id: signal.agency_id,
-    source_id: signal.source_id,
-    signal_type: signal.signal_type,
-    raw_data: signal.raw_data,
-  }));
-
-  return apiClient.post<MorningBriefResponseDto, SignalCreateDto[]>(
-    "/morning-brief/generate",
-    payload,
-  );
-}
-
 function buildDashboardData(
   signals: SignalResponseDto[],
-  morningBrief: MorningBriefResponseDto | null,
+  brief: PersistedMorningBriefReadDto | null,
 ): DashboardData {
-  const briefData = morningBrief
+  const briefData: MorningBriefData = brief
     ? {
         title: "Утренний бриф",
-        generatedAt: `Сформирован ${formatDate(morningBrief.generated_at)}`,
+        generatedAt: `Сформирован ${formatDate(brief.generated_at)}`,
         summary:
-          morningBrief.summary_text ||
+          brief.summary_text ||
           "Бриф сформирован на основе текущих сигналов backend.",
-        mainAction: morningBrief.main_action
-          ? toBriefAction(
-              morningBrief.main_action,
-              `${morningBrief.brief_id}-main`,
-              morningBrief.main_action.card_type === "risk" ? "risk" : "opportunity",
+        mainAction: brief.main_decision_card
+          ? persistedCardToBriefAction(
+              brief.main_decision_card,
+              brief.main_decision_card.card_type === "risk" ? "risk" : "opportunity",
             )
           : createEmptyMorningBrief().mainAction,
-        opportunities: morningBrief.opportunities.map((card, index) =>
-          toBriefAction(card, `${morningBrief.brief_id}-opportunity-${index}`, "opportunity"),
+        opportunities: brief.opportunity_cards.map((card) =>
+          persistedCardToBriefAction(card, "opportunity"),
         ),
-        risks: morningBrief.risks.map((card, index) =>
-          toBriefAction(card, `${morningBrief.brief_id}-risk-${index}`, "risk"),
+        risks: brief.risk_cards.map((card) =>
+          persistedCardToBriefAction(card, "risk"),
         ),
-        marketNotes: morningBrief.market_insights.map(
+        marketNotes: brief.market_insight_cards.map(
           (card) => `${card.title}: ${card.summary}`,
         ),
       }
     : createEmptyMorningBrief();
 
-  const cards = morningBrief
+  const cards = brief
     ? [
-        ...morningBrief.opportunities,
-        ...morningBrief.risks,
-        ...morningBrief.market_insights,
-      ].map((card, index) => toDecisionCard(card, `${morningBrief.brief_id}-${index}`))
+        ...brief.opportunity_cards,
+        ...brief.risk_cards,
+        ...brief.market_insight_cards,
+      ].map((card) => persistedCardToDecisionCard(card))
     : [];
 
   return {
-    kpis: createKpis(signals, morningBrief),
+    kpis: createKpis(signals, brief),
     signals: signals.map(toSignalItem),
     decisionCards: cards,
     morningBrief: briefData,
@@ -377,15 +402,145 @@ function buildDashboardData(
   };
 }
 
-export async function getDashboardData(): Promise<DashboardData> {
-  const signals = await apiClient.get<SignalResponseDto[]>("/signals");
+/** Загружает metadata-историю и читает последний persisted бриф агентства. */
+async function loadLatestPersistedBrief(
+  agencyId: string,
+): Promise<PersistedMorningBriefReadDto | null> {
+  const history = await apiClient.get<MorningBriefHistoryItemDto[]>(
+    `/agencies/${encodeURIComponent(agencyId)}/morning-briefs?limit=1&offset=0`,
+  );
+  const latest = history[0];
 
-  return buildDashboardData(signals, null);
+  if (!latest) {
+    return null;
+  }
+
+  return apiClient.get<PersistedMorningBriefReadDto>(
+    `/morning-brief/${encodeURIComponent(latest.brief_id)}?agency_id=${encodeURIComponent(agencyId)}`,
+  );
 }
 
-export async function generateMorningBriefDashboardData(): Promise<DashboardData> {
+/** Данные dashboard с последним persisted брифом (или пустым состоянием). */
+export async function getDashboardData(agencyId: string): Promise<DashboardData> {
   const signals = await apiClient.get<SignalResponseDto[]>("/signals");
-  const morningBrief = await requestMorningBrief(signals);
+  const brief = await loadLatestPersistedBrief(agencyId);
 
-  return buildDashboardData(signals, morningBrief);
+  return buildDashboardData(signals, brief);
+}
+
+export interface PersistedBriefGenerationResult {
+  data: DashboardData;
+  /** Backend вернул replay существующего брифа по idempotency key. */
+  replayed: boolean;
+  /** Конфликт даты: показан уже существующий бриф вместо создания нового. */
+  shownExisting: boolean;
+}
+
+function getTodayIsoDate(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function describePersistedCreateError(error: unknown): Error {
+  if (error instanceof ApiClientError) {
+    if (error.status === 403) {
+      return new Error("Нет доступа к брифам этого рабочего пространства.");
+    }
+    if (error.status === 404) {
+      return new Error("Часть сигналов не найдена в backend. Обновите данные и повторите.");
+    }
+    if (error.status === 400 || error.status === 422) {
+      return new Error("Backend отклонил запрос на создание брифа.");
+    }
+    if (error.status === 503 || error.status === 0) {
+      return new Error("Сервис генерации брифа временно недоступен. Повторите попытку позже.");
+    }
+  }
+
+  return error instanceof Error && error.message
+    ? new Error(error.message)
+    : new Error("Не удалось сформировать бриф. Повторите попытку позже.");
+}
+
+/**
+ * Создаёт persisted Morning Brief и читает его полное представление.
+ * Create-ответ содержит только IDs, поэтому карточки всегда догружаются
+ * отдельным GET read. 409 (бриф за эту дату уже существует из-за уникального
+ * индекса agency_id + brief_date) не считается ошибкой: возвращается
+ * существующий последний бриф через history + read.
+ */
+export async function createPersistedMorningBriefDashboardData(
+  agencyId: string,
+): Promise<PersistedBriefGenerationResult> {
+  const signals = await apiClient.get<SignalResponseDto[]>("/signals");
+
+  if (signals.length === 0) {
+    throw new Error("Нет сигналов для формирования брифа. Дождитесь поступления данных из источников.");
+  }
+
+  let createResponse: PersistedMorningBriefCreateResponseDto;
+
+  try {
+    createResponse = await apiClient.post<
+      PersistedMorningBriefCreateResponseDto,
+      PersistedMorningBriefCreateCommand
+    >("/morning-brief/persisted", {
+      agency_id: agencyId,
+      brief_date: getTodayIsoDate(),
+      signal_ids: signals.map((signal) => signal.signal_id),
+      idempotency_key: crypto.randomUUID(),
+      trigger_type: "manual",
+    });
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 409) {
+      const existingBrief = await loadLatestPersistedBrief(agencyId);
+
+      if (!existingBrief) {
+        throw new Error("Бриф на эту дату уже существует, но загрузить сохранённую версию не удалось.");
+      }
+
+      return {
+        data: buildDashboardData(signals, existingBrief),
+        replayed: false,
+        shownExisting: true,
+      };
+    }
+
+    throw describePersistedCreateError(error);
+  }
+
+  let brief: PersistedMorningBriefReadDto;
+
+  try {
+    brief = await apiClient.get<PersistedMorningBriefReadDto>(
+      `/morning-brief/${encodeURIComponent(createResponse.brief_id)}?agency_id=${encodeURIComponent(agencyId)}`,
+    );
+  } catch (error) {
+    throw describePersistedCreateError(error);
+  }
+
+  return {
+    data: buildDashboardData(signals, brief),
+    replayed: createResponse.replayed,
+    shownExisting: false,
+  };
+}
+
+/** Сохраняет feedback persisted Decision Card через центральный ApiClient. */
+export async function submitDecisionCardFeedback(
+  agencyId: string,
+  decisionCardId: string,
+  feedbackState: DecisionCardFeedbackValue,
+): Promise<DecisionCardFeedbackResponseDto> {
+  return apiClient.post<
+    DecisionCardFeedbackResponseDto,
+    { feedback_state: DecisionCardFeedbackValue }
+  >(
+    `/decision-cards/${encodeURIComponent(decisionCardId)}/feedback?agency_id=${encodeURIComponent(agencyId)}`,
+    { feedback_state: feedbackState },
+  );
 }

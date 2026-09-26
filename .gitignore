@@ -90,7 +90,7 @@ pytestdebug.log
 *.sqlite-wal
 *.sqlite-shm
 instance/
-data/
+/data/
 uploads/
 
 # Node.js, React и Vite

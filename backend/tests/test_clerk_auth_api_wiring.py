@@ -10,7 +10,11 @@ import pytest
 from clerk_backend_api.security import AuthStatus, RequestState
 from fastapi.testclient import TestClient
 
-from travel_revenue_ai.api.v1.tenant_dependencies import get_tenant_context
+from travel_revenue_ai.api.v1.tenant_dependencies import (
+    get_direct_tenant_context,
+    get_path_tenant_context,
+    get_tenant_context,
+)
 from travel_revenue_ai.config import Settings
 from travel_revenue_ai.database import get_db
 from travel_revenue_ai.main import app
@@ -20,7 +24,7 @@ from travel_revenue_ai.security.tenant_context import TenantContext
 
 ISSUER = "https://clerk.example.test"
 VERIFICATION_KEY = "test-verification-key"
-EXPECTED_PROTECTED_ROUTE_COUNT = 17
+EXPECTED_PROTECTED_ROUTE_COUNT = 18
 PUBLIC_PATHS = (
     "/health",
     "/health/live",
@@ -58,7 +62,7 @@ def test_all_api_v1_routes_require_current_principal() -> None:
     contexts = _api_router_contexts()
     route_count = sum(len(context.included_router.routes) for context in contexts)
 
-    assert len(contexts) == 5
+    assert len(contexts) == 6
     assert route_count == EXPECTED_PROTECTED_ROUTE_COUNT
     assert all(
         any(
@@ -159,3 +163,26 @@ def test_system_and_documentation_endpoints_do_not_require_clerk(
     responses = [api_client.get(path) for path in PUBLIC_PATHS]
 
     assert all(response.status_code != 401 for response in responses)
+
+
+def test_onboarding_route_is_protected_without_tenant_context() -> None:
+    """Onboarding требует Clerk Principal, но не подключает TenantContext."""
+    onboarding_routes = [
+        route
+        for context in _api_router_contexts()
+        for route in context.included_router.routes
+        if context.prefix + route.path == "/api/v1/onboarding"
+    ]
+
+    assert len(onboarding_routes) == 1
+    dependency_calls = {
+        dependency.call
+        for dependency in onboarding_routes[0].dependant.dependencies
+    }
+    tenant_dependencies = {
+        get_tenant_context,
+        get_path_tenant_context,
+        get_direct_tenant_context,
+    }
+    assert get_current_principal in dependency_calls
+    assert not dependency_calls & tenant_dependencies

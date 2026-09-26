@@ -36,6 +36,7 @@ from travel_revenue_ai.services.pipeline_service import PipelineService
 from travel_revenue_ai.services.signal_service import SignalService
 from travel_revenue_ai.services.source_collection_service import SourceCollectionService
 from travel_revenue_ai.services.tenant_authorization_service import TenantAuthorizationService
+from travel_revenue_ai.services.tenant_provisioning_service import TenantProvisioningService
 from travel_revenue_ai.sources.default_providers import register_default_providers
 from travel_revenue_ai.sources.manager import SourceManager
 from travel_revenue_ai.sources.provider_registry import ProviderRegistry
@@ -127,6 +128,13 @@ def build_tenant_authorization_service(
         identity_service=build_identity_resolution_service(session),
         membership_repository=MembershipRepository(session),
     )
+
+
+def build_tenant_provisioning_service(
+    session: Session,
+) -> TenantProvisioningService:
+    """Собирает write-сервис первичного tenant provisioning для одного запроса."""
+    return TenantProvisioningService(session=session)
 
 
 def build_persisted_morning_brief_service(

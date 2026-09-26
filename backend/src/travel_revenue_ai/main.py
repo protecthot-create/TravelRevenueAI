@@ -10,6 +10,7 @@ from travel_revenue_ai.api.v1 import (
     decision_cards_router,
     morning_brief_history_router,
     morning_brief_router,
+    onboarding_router,
     signals_router,
     sources_router,
 )
@@ -64,6 +65,11 @@ app.include_router(
 )
 app.include_router(
     decision_cards_router,
+    prefix="/api/v1",
+    dependencies=_api_v1_auth_dependencies,
+)
+app.include_router(
+    onboarding_router,
     prefix="/api/v1",
     dependencies=_api_v1_auth_dependencies,
 )

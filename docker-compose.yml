@@ -55,6 +55,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MORNING_BRIEF_RUN_TIME: ${MORNING_BRIEF_RUN_TIME:-08:00}
       MORNING_BRIEF_TIMEZONE: ${MORNING_BRIEF_TIMEZONE:-Europe/Moscow}
+      # Плановый запуск Morning Brief внутри FastAPI lifespan.
+      # Включать только на одном scheduler-owning backend-процессе.
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
       CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       CLERK_ISSUER: ${CLERK_ISSUER:-}
@@ -92,7 +95,7 @@ services:
     networks:
       - travel_revenue_network
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

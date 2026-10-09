@@ -13,7 +13,14 @@
 | `LOG_LEVEL` | нет | Уровень логирования, по умолчанию `INFO` |
 | `MORNING_BRIEF_RUN_TIME` | нет | Время `HH:MM`, по умолчанию `08:00` |
 | `MORNING_BRIEF_TIMEZONE` | нет | Часовой пояс, по умолчанию `Europe/Moscow` |
+| `SCHEDULER_ENABLED` | нет | Фоновый планировщик в FastAPI lifespan: код по умолчанию `false`, docker-compose backend по умолчанию `true` |
 | `FRONTEND_PORT` | нет | Внешний порт frontend, по умолчанию `8080` |
+
+При `SCHEDULER_ENABLED=true` backend запускает ежедневный сбор Morning Brief
+внутри FastAPI lifespan по `MORNING_BRIEF_RUN_TIME`/`MORNING_BRIEF_TIMEZONE`.
+Распределённая блокировка (advisory lock) в MVP не реализована: при
+multi-replica деплое включайте планировщик только на одном scheduler-owning
+backend-процессе.
 
 ## Аутентификация через Clerk
 

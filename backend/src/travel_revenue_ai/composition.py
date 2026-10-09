@@ -6,11 +6,14 @@ PipelineService не знает о конкретных RuleBased-компоне
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from travel_revenue_ai.config import Settings, settings
+from travel_revenue_ai.database import SessionLocal
 from travel_revenue_ai.repositories.membership_repository import MembershipRepository
 from travel_revenue_ai.revenue_intelligence.engine import RevenueIntelligenceEngine
 from travel_revenue_ai.revenue_intelligence.opportunity_detector import (
@@ -33,8 +36,12 @@ from travel_revenue_ai.services.persisted_morning_brief_service import (
     PersistedMorningBriefService,
 )
 from travel_revenue_ai.services.pipeline_service import PipelineService
+from travel_revenue_ai.services.scheduler_service import SchedulerService
 from travel_revenue_ai.services.signal_service import SignalService
-from travel_revenue_ai.services.source_collection_service import SourceCollectionService
+from travel_revenue_ai.services.source_collection_service import (
+    SourceCollectionResult,
+    SourceCollectionService,
+)
 from travel_revenue_ai.services.tenant_authorization_service import TenantAuthorizationService
 from travel_revenue_ai.services.tenant_provisioning_service import TenantProvisioningService
 from travel_revenue_ai.sources.default_providers import register_default_providers
@@ -103,6 +110,74 @@ def build_source_collection_service(
             session,
             app_settings,
         ),
+    )
+
+
+class ScheduledCollectionJob:
+    """Runtime-джоба планового запуска Morning Brief с per-run сессией.
+
+    Каждый плановый прогон создаёт свежую SQLAlchemy-сессию и заново собирает
+    граф зависимостей через ``build_source_collection_service``: адаптеры
+    источников не кэшируются между прогонами, а сессия гарантированно
+    закрывается и при успехе, и при ошибке. Транзакциями владеют существующие
+    сервисы — обёртка не делает commit и rollback самостоятельно.
+    """
+
+    def __init__(
+        self,
+        app_settings: Settings = settings,
+        session_factory: Callable[[], Session] = SessionLocal,
+        collection_builder: Callable[[Session, Settings], SourceCollectionService] | None = None,
+    ) -> None:
+        """Принимает фабрику сессий и опциональный builder для тестовых подмен."""
+        self._app_settings = app_settings
+        self._session_factory = session_factory
+        self._collection_builder = collection_builder or build_source_collection_service
+        self._logger = logging.getLogger(__name__)
+
+    def collect_and_generate_morning_brief(self) -> SourceCollectionResult:
+        """Выполняет один плановый запуск с независимой сессией и логом итога."""
+        self._logger.info("Плановый запуск Morning Brief начат")
+        session = self._session_factory()
+        try:
+            source_collection_service = self._collection_builder(session, self._app_settings)
+            result = source_collection_service.collect_and_generate_morning_brief()
+        except Exception as error:
+            self._logger.error(
+                "Плановый запуск Morning Brief завершился ошибкой",
+                extra={"error_type": type(error).__name__},
+            )
+            raise
+        finally:
+            session.close()
+        self._logger.info(
+            "Плановый запуск Morning Brief завершён: collected=%d, saved=%d, "
+            "errors=%d, persisted_agencies=%d",
+            result.collected_count,
+            result.saved_count,
+            result.errors_count,
+            len(result.persisted_briefs),
+        )
+        return result
+
+
+def build_scheduler_service(
+    app_settings: Settings = settings,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> SchedulerService:
+    """Собирает SchedulerService для планового запуска в FastAPI lifespan.
+
+    Возвращает существующий SchedulerService без изменения его контракта:
+    ежедневная задача регистрируется через ``register_daily_job``, а каждый
+    прогон получает свежую сессию через ``ScheduledCollectionJob``.
+    """
+    scheduled_job = ScheduledCollectionJob(
+        app_settings=app_settings,
+        session_factory=session_factory,
+    )
+    return SchedulerService(
+        source_collection_service=scheduled_job,
+        app_settings=app_settings,
     )
 
 

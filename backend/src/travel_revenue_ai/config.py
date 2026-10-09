@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 1800
 
     # Scheduler
+    # scheduler_enabled включает фоновый планировщик в FastAPI lifespan.
+    # Код/dev-умолчание: false (безопасно для тестов и ручного запуска).
+    # В docker-compose backend по умолчанию получает true.
+    scheduler_enabled: bool = False
     morning_brief_run_time: str = "08:00"
     morning_brief_timezone: str = "Europe/Moscow"
 

@@ -17,6 +17,9 @@ cp .env.example .env
 - `POSTGRES_PASSWORD` — пароль PostgreSQL;
 - `SECRET_ENCRYPTION_KEY` — ключ Fernet;
 - `CORS_ORIGINS` — публичный origin frontend, без `*` в production.
+- `VITE_CLERK_PUBLISHABLE_KEY` — publishable key для Clerk UI;
+- `CLERK_ISSUER` и один из `CLERK_JWT_KEY` / `CLERK_SECRET_KEY` — проверка
+  Clerk session token в backend.
 
 Ключ шифрования можно создать командой:
 
@@ -37,9 +40,8 @@ Compose выполняет миграции отдельным одноразо�
 После старта:
 
 - frontend: `http://localhost:8080`;
-- backend health: `http://localhost:8000/health`;
-- readiness: `http://localhost:8000/health/ready`;
-- liveness: `http://localhost:8000/health/live`.
+- SPA sign-in route: `http://localhost:8080/sign-in`;
+- внешний API за nginx: `http://localhost:8080/api/v1`.
 
 > Порт backend не опубликован наружу в стандартном compose-файле. Для диагностики используйте `docker compose exec backend` или временный override-файл, а внешний доступ идёт через frontend `/api/`.
 
@@ -50,12 +52,24 @@ docker compose ps
 docker compose logs migrate
 docker compose logs backend
 docker compose logs frontend
+docker compose exec -T backend alembic current
+docker compose exec -T backend alembic heads
 ```
 
 Ожидается:
 
 - `migrate` — статус `exited (0)`;
 - `postgres`, `backend`, `frontend` — `running` и `healthy`.
+- Alembic `current` совпадает с `heads`;
+- `/` и `/sign-in` на frontend возвращают `200`;
+- защищённый `/api/v1` endpoint без Bearer token возвращает `401`,
+  `authentication_required` и `WWW-Authenticate: Bearer`.
+
+Эти автоматические smoke-проверки подтверждают PostgreSQL, миграции, backend,
+scheduler, nginx proxy и auth boundary, но не заменяют пользовательский Clerk
+E2E. Sign-in, onboarding, tenant, persisted Morning Brief, feedback и сохранение
+состояния после reload проверяются вручную в браузере с локально заданными Clerk
+ключами и реальными входными signals. Секреты и session token в отчёт не копируются.
 
 ## Остановка
 

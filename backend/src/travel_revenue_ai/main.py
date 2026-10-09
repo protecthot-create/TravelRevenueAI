@@ -1,8 +1,10 @@
 """Главный модуль FastAPI приложения Travel Revenue AI."""
 
-from contextlib import asynccontextmanager
+import logging
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,15 +16,19 @@ from travel_revenue_ai.api.v1 import (
     signals_router,
     sources_router,
 )
+from travel_revenue_ai.composition import build_scheduler_service
 from travel_revenue_ai.config import settings
 from travel_revenue_ai.health import is_ready, readiness_checks
 from travel_revenue_ai.observability.runtime import install_observability
 from travel_revenue_ai.security.clerk_auth import get_current_principal
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Проверяет обязательную инфраструктуру до приёма пользовательского трафика."""
+    """Проверяет обязательную инфраструктуру и запускает плановый сбор."""
+
     checks = readiness_checks(http_metrics.render_prometheus)
     if not is_ready(checks):
         details = "; ".join(
@@ -31,7 +37,37 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             if result["status"] != "ok"
         )
         raise RuntimeError(f"Startup validation не пройдена: {details}")
-    yield
+
+    # Плановый запуск включается только явным флагом: в тестах, dev-режиме и
+    # на не-scheduler репликах приложение стартует без фонового планировщика.
+    scheduler: AsyncIOScheduler | None = None
+    if settings.scheduler_enabled:
+        scheduler_service = build_scheduler_service()
+        try:
+            scheduler = AsyncIOScheduler()
+            scheduler_service.register_daily_job(scheduler)
+            scheduler.start()
+        except Exception:
+            if scheduler is not None and scheduler.running:
+                scheduler.shutdown(wait=False)
+            raise
+        schedule = scheduler_service.daily_schedule
+        logger.info(
+            "Плановый запуск Morning Brief включён: daily job зарегистрирован "
+            "на %02d:%02d (%s)",
+            schedule.hour,
+            schedule.minute,
+            schedule.timezone,
+        )
+    else:
+        logger.info("Плановый запуск Morning Brief отключён (SCHEDULER_ENABLED=false)")
+
+    try:
+        yield
+    finally:
+        if scheduler is not None and scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("Плановый запуск Morning Brief остановлен")
 
 
 # Создание приложения FastAPI

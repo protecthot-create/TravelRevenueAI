@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from travel_revenue_ai.config import Settings, settings
-from travel_revenue_ai.services.source_collection_service import (
-    SourceCollectionResult,
-    SourceCollectionService,
-)
+from travel_revenue_ai.services.source_collection_service import SourceCollectionResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +35,17 @@ class JobScheduler(Protocol):
         """Регистрирует задачу в планировщике."""
 
 
+class CollectionJob(Protocol):
+    """Минимальный контракт сервиса сбора для регистрации ежедневной задачи.
+
+    ``SourceCollectionService`` удовлетворяет контракту; runtime-обёртка
+    планового запуска из composition root предоставляет тот же метод.
+    """
+
+    def collect_and_generate_morning_brief(self) -> SourceCollectionResult:
+        """Выполняет один полный запуск сбора и генерации Morning Brief."""
+
+
 class SchedulerService:
     """Запускает сбор источников вручную и готовит ежедневное расписание.
 
@@ -48,7 +56,7 @@ class SchedulerService:
     def __init__(
         self,
         *,
-        source_collection_service: SourceCollectionService,
+        source_collection_service: CollectionJob,
         app_settings: Settings = settings,
     ) -> None:
         """Инициализирует сервис с настройками времени ежедневного запуска."""
